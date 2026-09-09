@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GestureScope — Live Hand Reader</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<style>
+  :root{
+    --bg: #12181A;
+    --panel: #182220;
+    --panel-edge: #24312E;
+    --phosphor: #4CFF9A;
+    --phosphor-dim: #2A8F5C;
+    --amber: #FFB454;
+    --slate: #86A69E;
+    --slate-dim: #4B615C;
+    --danger: #FF6B5E;
+    --mono: "IBM Plex Mono", "SF Mono", Consolas, monospace;
+    --sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+  }
+  @font-face{
+    font-family: "IBM Plex Mono";
+    src: local("IBM Plex Mono");
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background: var(--bg);
+    font-family: var(--sans);
+    color: var(--slate);
+    overflow:hidden;
+  }
+  #app{
+    display:flex;
+    flex-direction:column;
+    height:100vh;
+    width:100vw;
+  }
+
+  /* ---- Top bar ---- */
+  header{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    padding: 14px 18px 10px 18px;
+    border-bottom: 1px solid var(--panel-edge);
+    flex-shrink:0;
+  }
+  .brand{
+    font-family: var(--mono);
+    font-size: 15px;
+    letter-spacing: 0.5px;
+    color: var(--phosphor);
+  }
+  .brand span{ color: var(--slate-dim); }
+  .status-line{
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--slate-dim);
+    display:flex;
+    gap:14px;
+  }
+  .status-line b{ color: var(--slate); font-weight:500; }
+  .dot{
+    display:inline-block;
+    width:6px; height:6px;
+    border-radius:50%;
+    margin-right:5px;
+    background: var(--slate-dim);
+    position:relative; top:-1px;
+  }
+  .dot.live{ background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); }
+  .dot.err{ background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+  /* ---- Main split ---- */
+  main{
+    flex:1;
+    display:flex;
+    min-height:0;
+  }
+  .stage{
+    position:relative;
+    flex: 1.4;
+    background:#000;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    border-right: 1px solid var(--panel-edge);
+  }
+  video, canvas{
+    position:absolute;
+    top:50%; left:50%;
+    transform: translate(-50%,-50%) scaleX(-1);
+    max-width:100%;
+    max-height:100%;
+  }
+  #video{ opacity:0; }
+  .scan-grid{
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    background-image:
+      linear-gradient(rgba(76,255,154,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(76,255,154,0.05) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .stage-overlay{
+    position:absolute;
+    top:12px; left:12px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--phosphor-dim);
+    letter-spacing:0.5px;
+    pointer-events:none;
+  }
+  .stage-overlay.br{ left:auto; right:12px; top:auto; bottom:12px; text-align:right; }
+
+  .permission-msg{
+    position:absolute; inset:0;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    gap:14px;
+    text-align:center;
+    padding: 0 30px;
+    font-family: var(--sans);
+    z-index:5;
+  }
+  .permission-msg .icon{ font-size:34px; }
+  .permission-msg h2{
+    font-size:16px; color:#E4EDE9; margin:0; font-weight:600;
+  }
+  .permission-msg p{ font-size:13px; color: var(--slate); margin:0; max-width:320px; line-height:1.5; }
+  .permission-msg button{
+    margin-top:6px;
+    background: var(--phosphor);
+    color:#0A1210;
+    border:none;
+    padding: 10px 20px;
+    border-radius: 3px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight:600;
+    letter-spacing: 0.5px;
+    cursor:pointer;
+  }
+  .permission-msg button:hover{ background:#66FFAD; }
+
+  /* ---- Readout panel ---- */
+  .readout{
+    flex: 1;
+    display:flex;
+    flex-direction:column;
+    padding: 22px 24px;
+    min-width: 260px;
+    max-width: 420px;
+  }
+  .readout-label{
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--slate-dim);
+    letter-spacing: 1px;
+  }
+  .gesture-panel{
+    margin-top:10px;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 4px;
+    padding: 26px 20px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap: 10px;
+    min-height: 190px;
+    position:relative;
+  }
+  .gesture-glyph{
+    font-size: 58px;
+    line-height:1;
+    filter: drop-shadow(0 0 14px rgba(76,255,154,0.35));
+    transition: opacity 90ms ease;
+  }
+  .gesture-name{
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--phosphor);
+    letter-spacing: 1px;
+    transition: opacity 90ms ease;
+  }
+  .gesture-name.idle{ color: var(--slate-dim); font-size:15px; font-weight:400; }
+  .confidence-bar{
+    width:100%;
+    height:3px;
+    background: var(--panel-edge);
+    border-radius:2px;
+    overflow:hidden;
+    margin-top:4px;
+  }
+  .confidence-fill{
+    height:100%;
+    background: var(--phosphor);
+    width:0%;
+    transition: width 80ms linear;
+  }
+
+  .metrics{
+    margin-top:16px;
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap:1px;
+    background: var(--panel-edge);
+    border: 1px solid var(--panel-edge);
+    border-radius:4px;
+    overflow:hidden;
+  }
+  .metric{
+    background: var(--panel);
+    padding: 12px 14px;
+  }
+  .metric-k{
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--slate-dim);
+    letter-spacing:0.5px;
+  }
+  .metric-v{
+    font-family: var(--mono);
+    font-size: 17px;
+    color: #DCEAE5;
+    margin-top: 4px;
+  }
+  .metric-v.accent{ color: var(--amber); }
+
+  .legend{
+    margin-top: 18px;
+    flex:1;
+    overflow-y:auto;
+  }
+  .legend-title{
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--slate-dim);
+    letter-spacing:0.5px;
+    margin-bottom:8px;
+  }
+  .legend-grid{
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+  }
+  .legend-item{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    font-size: 11.5px;
+    color: var(--slate);
+    padding: 3px 0;
+  }
+  .legend-item .g{ font-size:15px; width:18px; text-align:center; }
+  .legend-item.active{ color: var(--phosphor); }
+  .legend-item.active .g{ filter: drop-shadow(0 0 4px var(--phosphor)); }
+
+  footer{
+    flex-shrink:0;
+    border-top: 1px solid var(--panel-edge);
+    padding: 8px 18px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--slate-dim);
+    display:flex;
+    justify-content:space-between;
+  }
+
+  @media (max-width: 720px){
+    main{ flex-direction:column; }
+    .stage{ border-right:none; border-bottom:1px solid var(--panel-edge); flex:1.1; }
+    .readout{ max-width:none; padding: 16px 18px; }
+    .legend{ display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="brand">GESTURE<span>SCOPE</span></div>
+    <div class="status-line">
+      <span><span class="dot" id="liveDot"></span><b id="liveText">idle</b></span>
+      <span>lat <b id="latVal">—</b> ms</span>
+      <span>fps <b id="fpsVal">—</b></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="stage" id="stage">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas"></canvas>
+      <div class="scan-grid"></div>
+      <div class="stage-overlay">TRACK · 21pt landmark</div>
+      <div class="stage-overlay br" id="handedness">— hand</div>
+
+      <div class="permission-msg" id="permMsg">
+        <div class="icon">✋</div>
+        <h2>Point the camera at your hand</h2>
+        <p>GestureScope reads hand shape directly from the video feed, on your device. Nothing is uploaded or recorded.</p>
+        <button id="startBtn">Enable camera</button>
+      </div>
+    </div>
+
+    <div class="readout">
+      <div class="readout-label">CURRENT READING</div>
+      <div class="gesture-panel">
+        <div class="gesture-glyph" id="glyph">·</div>
+        <div class="gesture-name idle" id="gestureName">no hand detected</div>
+        <div class="confidence-bar"><div class="confidence-fill" id="confFill"></div></div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-k">FINGERS UP</div>
+          <div class="metric-v accent" id="fingerCount">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-k">HOLD TIME</div>
+          <div class="metric-v" id="holdTime">0.0s</div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <div class="legend-title">RECOGNIZED SET</div>
+        <div class="legend-grid" id="legendGrid"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span>21-point landmark model · geometric classifier · client-side only</span>
+    <span id="clock">—</span>
+  </footer>
+</div>
+
+<script>
+/* ============================================================
+   GESTURE DEFINITIONS
+   ============================================================ */
+const GESTURES = [
+  { id:"fist",     name:"Fist",       glyph:"✊" },
+  { id:"one",      name:"One",        glyph:"☝️" },
+  { id:"two",      name:"Two",        glyph:"✌️" },
+  { id:"three",    name:"Three",      glyph:"🤟" },
+  { id:"four",     name:"Four",       glyph:"🖖" },
+  { id:"open",     name:"Open Palm",  glyph:"🖐️" },
+  { id:"thumbsup", name:"Thumbs Up",  glyph:"👍" },
+  { id:"rock",     name:"Rock Sign",  glyph:"🤘" },
+  { id:"ok",       name:"OK Sign",    glyph:"👌" },
+  { id:"call",     name:"Call Me",    glyph:"🤙" },
+];
+
+const legendGrid = document.getElementById('legendGrid');
+GESTURES.forEach(g=>{
+  const el = document.createElement('div');
+  el.className = 'legend-item';
+  el.id = 'legend-'+g.id;
+  el.innerHTML = `<span class="g">${g.glyph}</span><span>${g.name}</span>`;
+  legendGrid.appendChild(el);
+});
+
+/* ============================================================
+   DOM refs
+   ============================================================ */
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const glyphEl = document.getElementById('glyph');
+const nameEl = document.getElementById('gestureName');
+const confFill = document.getElementById('confFill');
+const fingerCountEl = document.getElementById('fingerCount');
+const holdTimeEl = document.getElementById('holdTime');
+const liveDot = document.getElementById('liveDot');
+const liveText = document.getElementById('liveText');
+const latVal = document.getElementById('latVal');
+const fpsVal = document.getElementById('fpsVal');
+const handednessEl = document.getElementById('handedness');
+const permMsg = document.getElementById('permMsg');
+const startBtn = document.getElementById('startBtn');
+const clockEl = document.getElementById('clock');
+const stage = document.getElementById('stage');
+
+/* ============================================================
+   Geometry helpers
+   ============================================================ */
+function dist(a,b){
+  return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
+}
+
+// Landmark indices (MediaPipe Hands)
+const WRIST=0;
+const THUMB_TIP=4, THUMB_IP=3, THUMB_MCP=2;
+const IDX_TIP=8, IDX_PIP=6, IDX_MCP=5;
+const MID_TIP=12, MID_PIP=10, MID_MCP=9;
+const RING_TIP=16, RING_PIP=14, RING_MCP=13;
+const PINKY_TIP=20, PINKY_PIP=18, PINKY_MCP=17;
+
+function fingerExtended(lm, tip, pip, mcp){
+  const dTipWrist = dist(lm[tip], lm[WRIST]);
+  const dPipWrist = dist(lm[pip], lm[WRIST]);
+  const dMcpWrist = dist(lm[mcp], lm[WRIST]);
+  // Extended if tip is meaningfully further from wrist than the pip joint,
+  // and pip itself is further than mcp (rules out a curled finger poking sideways)
+  return dTipWrist > dPipWrist * 1.08 && dPipWrist > dMcpWrist * 0.9;
+}
+
+function thumbExtended(lm, handedness){
+  // Thumb: compare its tip distance from the pinky-MCP (palm-crossing distance)
+  // vs the thumb's own MCP distance from the same point — reliable across rotation.
+  const ref = lm[PINKY_MCP];
+  const dTip = dist(lm[THUMB_TIP], ref);
+  const dMcp = dist(lm[THUMB_MCP], ref);
+  return dTip > dMcp * 1.15;
+}
+
+function classify(lm, handedness){
+  const idx = fingerExtended(lm, IDX_TIP, IDX_PIP, IDX_MCP);
+  const mid = fingerExtended(lm, MID_TIP, MID_PIP, MID_MCP);
+  const ring = fingerExtended(lm, RING_TIP, RING_PIP, RING_MCP);
+  const pinky = fingerExtended(lm, PINKY_TIP, PINKY_PIP, PINKY_MCP);
+  const thumb = thumbExtended(lm, handedness);
+
+  const upCount = [idx,mid,ring,pinky].filter(Boolean).length;
+
+  // OK sign: thumb tip and index tip pinched close together, other three extended
+  const pinchDist = dist(lm[THUMB_TIP], lm[IDX_TIP]);
+  const handSpan = dist(lm[WRIST], lm[MID_MCP]) || 0.001;
+  const pinched = (pinchDist / handSpan) < 0.35;
+
+  if (pinched && mid && ring && pinky){
+    return { id:"ok", fingers: upCount };
+  }
+  if (thumb && !idx && !mid && !ring && pinky){
+    return { id:"call", fingers: upCount };
+  }
+  if (thumb && idx && !mid && !ring && pinky){
+    return { id:"rock", fingers: upCount };
+  }
+  if (!thumb && idx && !mid && !ring && pinky){
+    return { id:"rock", fingers: upCount };
+  }
+  if (thumb && !idx && !mid && !ring && !pinky){
+    return { id:"thumbsup", fingers: upCount };
+  }
+  if (thumb && idx && mid && ring && pinky){
+    return { id:"open", fingers: upCount };
+  }
+  if (!thumb && idx && mid && ring && pinky){
+    return { id:"four", fingers: upCount };
+  }
+  if (idx && mid && ring && !pinky){
+    return { id:"three", fingers: upCount };
+  }
+  if (idx && mid && !ring && !pinky){
+    return { id:"two", fingers: upCount };
+  }
+  if (idx && !mid && !ring && !pinky){
+    return { id:"one", fingers: upCount };
+  }
+  if (!idx && !mid && !ring && !pinky && !thumb){
+    return { id:"fist", fingers: 0 };
+  }
+  return null; // ambiguous — don't force a label
+}
+
+/* ============================================================
+   Drawing
+   ============================================================ */
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+function drawLandmarks(lm, w, h){
+  ctx.save();
+  ctx.strokeStyle = 'rgba(76,255,154,0.55)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  CONNECTIONS.forEach(([a,b])=>{
+    ctx.moveTo(lm[a].x*w, lm[a].y*h);
+    ctx.lineTo(lm[b].x*w, lm[b].y*h);
+  });
+  ctx.stroke();
+
+  lm.forEach((p, i)=>{
+    const isTip = [4,8,12,16,20].includes(i);
+    ctx.beginPath();
+    ctx.arc(p.x*w, p.y*h, isTip ? 4.5 : 2.5, 0, Math.PI*2);
+    ctx.fillStyle = isTip ? '#4CFF9A' : 'rgba(76,255,154,0.75)';
+    ctx.shadowColor = '#4CFF9A';
+    ctx.shadowBlur = isTip ? 8 : 0;
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+/* ============================================================
+   Smoothing / debounce state
+   ============================================================ */
+let currentGestureId = null;
+let candidateId = null;
+let candidateFrames = 0;
+const STABLE_FRAMES = 3; // frames of agreement required before switching label -> kills jitter, keeps skeleton instant
+let holdStart = null;
+let lastFrameTime = performance.now();
+let fpsSmoothed = 0;
+
+function updateReadout(result, lm){
+  const now = performance.now();
+  const frameDt = now - lastFrameTime;
+  lastFrameTime = now;
+  const instFps = 1000/frameDt;
+  fpsSmoothed = fpsSmoothed ? fpsSmoothed*0.85 + instFps*0.15 : instFps;
+  fpsVal.textContent = fpsSmoothed.toFixed(0);
+
+  if (!result){
+    candidateId = null; candidateFrames = 0;
+    currentGestureId = null;
+    holdStart = null;
+    glyphEl.textContent = '·';
+    nameEl.textContent = 'no hand detected';
+    nameEl.classList.add('idle');
+    confFill.style.width = '0%';
+    fingerCountEl.textContent = '0';
+    holdTimeEl.textContent = '0.0s';
+    liveDot.classList.remove('live');
+    liveText.textContent = 'searching';
+    handednessEl.textContent = '— hand';
+    GESTURES.forEach(g=> document.getElementById('legend-'+g.id).classList.remove('active'));
+    return;
+  }
+
+  liveDot.classList.add('live');
+  liveText.textContent = 'tracking';
+  fingerCountEl.textContent = result.fingers;
+
+  if (!result.id){
+    // ambiguous transition frame — keep last stable label, don't flicker to blank
+  } else if (result.id === candidateId){
+    candidateFrames++;
+  } else {
+    candidateId = result.id;
+    candidateFrames = 1;
+  }
+
+  if (candidateFrames >= STABLE_FRAMES && candidateId !== currentGestureId){
+    currentGestureId = candidateId;
+    holdStart = now;
+    GESTURES.forEach(g=> document.getElementById('legend-'+g.id).classList.toggle('active', g.id===currentGestureId));
+  }
+
+  if (currentGestureId){
+    const g = GESTURES.find(x=>x.id===currentGestureId);
+    glyphEl.textContent = g.glyph;
+    nameEl.textContent = g.name;
+    nameEl.classList.remove('idle');
+    const conf = Math.min(100, 55 + candidateFrames*12);
+    confFill.style.width = conf+'%';
+    if (holdStart) holdTimeEl.textContent = ((now-holdStart)/1000).toFixed(1)+'s';
+  } else {
+    glyphEl.textContent = '…';
+    nameEl.textContent = 'reading…';
+    nameEl.classList.add('idle');
+  }
+}
+
+/* ============================================================
+   MediaPipe Hands setup
+   ============================================================ */
+let hands, streamStarted = false;
+let procStart = 0;
+
+function onResults(results){
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0,0,w,h);
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
+    const lm = results.multiHandLandmarks[0];
+    const handInfo = results.multiHandedness ? results.multiHandedness[0] : null;
+    handednessEl.textContent = (handInfo ? handInfo.label : '—') + ' hand';
+    drawLandmarks(lm, w, h);
+    const cls = classify(lm, handInfo ? handInfo.label : null);
+    updateReadout(cls, lm);
+  } else {
+    updateReadout(null, null);
+  }
+
+  latVal.textContent = (performance.now() - procStart).toFixed(0);
+}
+
+async function initHands(){
+  hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 0,        // lowest complexity model = lowest latency
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  hands.onResults(onResults);
+}
+
+async function startCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: {ideal:640}, height:{ideal:480} },
+      audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(res => { video.onloadedmetadata = () => res(); });
+    await video.play();
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    permMsg.style.display = 'none';
+    streamStarted = true;
+    liveText.textContent = 'searching';
+
+    loop();
+  } catch(err){
+    liveDot.classList.add('err');
+    liveText.textContent = 'no camera access';
+    permMsg.innerHTML = `
+      <div class="icon">⚠️</div>
+      <h2>Camera access needed</h2>
+      <p>GestureScope couldn't reach your camera. Check the browser's permission prompt or your device settings, then try again.</p>
+      <button id="retryBtn">Try again</button>
+    `;
+    document.getElementById('retryBtn').addEventListener('click', startCamera);
+  }
+}
+
+async function loop(){
+  if (!streamStarted) return;
+  procStart = performance.now();
+  await hands.send({ image: video });
+  requestAnimationFrame(loop);
+}
+
+startBtn.addEventListener('click', async ()=>{
+  startBtn.textContent = 'Starting…';
+  startBtn.disabled = true;
+  await initHands();
+  await startCamera();
+});
+
+/* Clock */
+setInterval(()=>{
+  clockEl.textContent = new Date().toLocaleTimeString();
+}, 1000);
+</script>
+</body>
+</html>
