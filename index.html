@@ -1,0 +1,1286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1330">
+<title>Mimic – 3D camera puppet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#1a1330; --ink-2:#251b45; --ink-3:#31255c;
+  --lemon:#ffd23f; --mint:#3ee0cf; --coral:#ff5d8f;
+  --text:#f4f0ff; --muted:#a99fd0;
+  --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--ink);color:var(--text);
+  font-family:'Fredoka',ui-rounded,'SF Pro Rounded',system-ui,sans-serif;
+  overflow:hidden;-webkit-tap-highlight-color:transparent}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}
+input[type=range]{accent-color:var(--coral)}
+:focus-visible{outline:3px solid var(--lemon);outline-offset:2px}
+
+#app{position:fixed;inset:0;display:flex;flex-direction:column;padding-top:var(--safe-t)}
+#stageWrap{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:10px}
+#stage{position:relative;overflow:hidden;border-radius:24px;width:100%;height:100%;max-width:560px;
+  background:radial-gradient(120% 90% at 50% 12%,#4c3a94 0%,#2b2055 46%,#1a1330 100%);
+  box-shadow:0 0 0 2px rgba(255,255,255,.06),0 18px 40px rgba(0,0,0,.45)}
+#stage.transparent-bg{background:
+  repeating-conic-gradient(#241a3d 0% 25%, #1a1330 0% 50%) 0 0/24px 24px}
+#video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:0;transition:opacity .25s}
+#gl,#overlay{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
+
+#pill{position:absolute;left:18px;top:18px;max-width:calc(100% - 36px);padding:7px 14px;border-radius:999px;
+  background:rgba(26,19,48,.78);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  font-size:14px;font-weight:500;display:flex;gap:8px;align-items:center;pointer-events:none}
+#pill i{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+#pill.live i{background:var(--mint)}
+#pill.warn i{background:var(--lemon)}
+
+#intro{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+  background:rgba(26,19,48,.9);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:5}
+#intro[hidden]{display:none}
+#intro .card{width:min(360px,100%);text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px}
+h1{font-size:44px;line-height:1;font-weight:600;letter-spacing:-.01em}
+#intro p{color:var(--muted);font-size:16px;line-height:1.4}
+#intro .fine{font-size:14px}
+#start{margin-top:8px;padding:14px 30px;border-radius:999px;background:var(--lemon);color:var(--ink);
+  font-size:19px;font-weight:600;box-shadow:0 5px 0 #c99a00;transition:transform .08s,box-shadow .08s}
+#start:active{transform:translateY(4px);box-shadow:0 1px 0 #c99a00}
+#start:disabled{opacity:.65}
+#msg{min-height:22px;font-size:15px;color:var(--text)}
+#msg.err{color:#ff9db8}
+
+#tray{background:var(--ink-2);border-radius:26px 26px 0 0;padding:12px 14px calc(12px + var(--safe-b));
+  display:flex;flex-direction:column;gap:10px;max-height:46vh;overflow-y:auto}
+#chars{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding:2px}
+#chars::-webkit-scrollbar{display:none}
+.chip{flex:none;display:flex;align-items:center;gap:6px;padding:9px 14px;border-radius:999px;
+  border:2px solid transparent;background:var(--ink-3);font-size:14px;font-weight:500;color:var(--text)}
+.chip .dot{width:14px;height:14px;border-radius:50%;flex:none}
+.chip[aria-checked="true"]{border-color:var(--lemon);background:#3d2f73}
+#addCustom{color:var(--muted)}
+#addCustom span.dot{background:transparent;border:2px dashed var(--muted)}
+
+#toggles{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none}
+#toggles::-webkit-scrollbar{display:none}
+.tg{flex:none;padding:8px 16px;border-radius:999px;background:var(--ink-3);font-size:15px;font-weight:500;
+  border:2px solid transparent;color:var(--muted)}
+.tg[aria-pressed="true"]{background:var(--mint);color:var(--ink)}
+.tg:disabled{opacity:.4}
+
+#transport{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#transport button{flex:none;padding:8px 14px;border-radius:999px;background:var(--ink-3);font-size:14px;font-weight:500}
+#rec[aria-pressed="true"]{background:var(--coral);color:var(--ink)}
+#transport button:disabled{opacity:.4}
+#timeline{flex:1;min-width:80px}
+#speed{width:64px}
+.row-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+
+details#settings{background:var(--ink-3);border-radius:16px;padding:2px 12px}
+details#settings summary{padding:10px 0;font-size:15px;font-weight:500;cursor:pointer;list-style:none}
+details#settings summary::-webkit-details-marker{display:none}
+.setting{display:flex;align-items:center;gap:12px;padding:8px 0;font-size:14px;color:var(--muted)}
+.setting input[type=range]{flex:1;min-width:0}
+.setting button{padding:6px 12px;border-radius:999px;background:var(--ink-2);color:var(--text);font-size:13px}
+.setting .switch[aria-pressed="true"]{background:var(--mint);color:var(--ink)}
+#customFile{display:none}
+
+@media (min-width:820px){
+  #app{flex-direction:row-reverse;padding-top:0}
+  #stageWrap{padding:18px}
+  #tray{width:320px;border-radius:0;padding:20px 18px;justify-content:flex-start;gap:16px;max-height:none;overflow-y:auto}
+  #chars{flex-wrap:wrap;overflow:visible}
+  #toggles{flex-wrap:wrap}
+}
+
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="stageWrap">
+    <div id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="gl"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="pill" role="status"><i></i><span id="pillTxt">Ready</span></div>
+
+    <div id="intro">
+      <div class="card">
+        <h1>Mimic</h1>
+        <p>Move, wave, make a face. A 3D cartoon character copies your body, hands and expressions in real time.</p>
+        <p class="fine">Tracking runs inside this browser. Your video is never uploaded.</p>
+        <button id="start">Start camera</button>
+        <p id="msg" role="alert"></p>
+      </div>
+    </div>
+  </div>
+
+  <div id="tray">
+    <div id="chars" role="radiogroup" aria-label="Character">
+      <button id="addCustom" class="chip" type="button">
+        <span class="dot">+</span><span>Import GLB</span>
+      </button>
+    </div>
+    <input id="customFile" type="file" accept=".glb,.gltf">
+
+    <div id="toggles">
+      <button class="tg" data-k="hands" aria-pressed="true">Hands</button>
+      <button class="tg" data-k="face" aria-pressed="true">Face</button>
+      <button class="tg" data-k="cam" aria-pressed="false">Camera</button>
+      <button class="tg" data-k="skel" aria-pressed="false">Skeleton</button>
+    </div>
+
+    <div class="row-label">Record</div>
+    <div id="transport">
+      <button id="rec" type="button">● Rec</button>
+      <button id="play" type="button" disabled>▶ Play</button>
+      <button id="restart" type="button" disabled>⟲</button>
+      <input id="timeline" type="range" min="0" max="1" step="0.01" value="0" disabled aria-label="Playback position">
+      <input id="speed" type="number" min="0.25" max="2" step="0.25" value="1" aria-label="Playback speed">
+    </div>
+
+    <details id="settings">
+      <summary>Settings</summary>
+      <div class="setting">
+        <span>Mirror mode</span>
+        <button class="tg switch" data-k="mirror" aria-pressed="true">On</button>
+      </div>
+      <div class="setting">
+        <span>Environment</span>
+        <button class="tg switch" data-k="env" aria-pressed="true">Ground</button>
+      </div>
+      <div class="setting">
+        <span>Transparent bg</span>
+        <button class="tg switch" data-k="transparent" aria-pressed="false">Off</button>
+      </div>
+      <div class="setting">Rotate <input id="rot" type="range" min="-180" max="180" value="0"></div>
+      <div class="setting">Scale <input id="scale" type="range" min="50" max="160" value="100"></div>
+      <div class="setting">Distance <input id="dist" type="range" min="180" max="500" value="310"></div>
+    </details>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ===== skeleton.js =====
+// skeleton.js
+// Defines the GENERIC humanoid bone set Mimic understands, and a builder that
+// constructs that skeleton procedurally out of primitives (so the app has zero
+// external asset dependency out of the box). Real GLB/GLTF characters can be
+// dropped in later (see characters.js loadGLBCharacter) as long as their bone
+// names can be mapped onto this same list — that mapping is what makes one
+// motion solver drive completely different character meshes.
+
+// The canonical bone roles the retargeter knows how to drive. A character
+// only needs to provide the bones it actually has; missing bones are skipped.
+const BONE_NAMES = [
+  'Hips', 'Spine', 'Chest', 'Neck', 'Head',
+  'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand',
+  'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'LeftToes',
+  'RightUpperLeg', 'RightLowerLeg', 'RightFoot', 'RightToes',
+  // simplified one-joint-per-finger curl bones (root of each finger)
+  'LeftThumb', 'LeftIndex', 'LeftMiddle', 'LeftRing', 'LeftPinky',
+  'RightThumb', 'RightIndex', 'RightMiddle', 'RightRing', 'RightPinky',
+  // fallback face bones, used only if a character has no blendshapes
+  'Jaw', 'LeftEyeLid', 'RightEyeLid', 'LeftBrow', 'RightBrow', 'MouthCorner'
+];
+
+// Parent map: child -> parent bone name (or null for the root). This is the
+// hierarchy every procedural and every auto-mapped GLB character conforms to.
+const BONE_PARENT = {
+  Hips: null, Spine: 'Hips', Chest: 'Spine', Neck: 'Chest', Head: 'Neck',
+  LeftShoulder: 'Chest', LeftUpperArm: 'LeftShoulder', LeftLowerArm: 'LeftUpperArm', LeftHand: 'LeftLowerArm',
+  RightShoulder: 'Chest', RightUpperArm: 'RightShoulder', RightLowerArm: 'RightUpperArm', RightHand: 'RightLowerArm',
+  LeftUpperLeg: 'Hips', LeftLowerLeg: 'LeftUpperLeg', LeftFoot: 'LeftLowerLeg', LeftToes: 'LeftFoot',
+  RightUpperLeg: 'Hips', RightLowerLeg: 'RightUpperLeg', RightFoot: 'RightLowerLeg', RightToes: 'RightFoot',
+  LeftThumb: 'LeftHand', LeftIndex: 'LeftHand', LeftMiddle: 'LeftHand', LeftRing: 'LeftHand', LeftPinky: 'LeftHand',
+  RightThumb: 'RightHand', RightIndex: 'RightHand', RightMiddle: 'RightHand', RightRing: 'RightHand', RightPinky: 'RightHand',
+  Jaw: 'Head', LeftEyeLid: 'Head', RightEyeLid: 'Head', LeftBrow: 'Head', RightBrow: 'Head', MouthCorner: 'Head'
+};
+
+// Rest-pose local offset (from parent bone origin) and the bone's local
+// "forward" axis (the direction the bone points at rest, used by the
+// retargeter to compute swing rotations). Units are abstract "heads" (h);
+// each character scales the whole rig by its own head size.
+const Y = new THREE.Vector3(0, 1, 0), NY = new THREE.Vector3(0, -1, 0);
+const X = new THREE.Vector3(1, 0, 0), NX = new THREE.Vector3(-1, 0, 0);
+const BONE_REST = {
+  Hips: { pos: [0, 3.1, 0], axis: Y },
+  Spine: { pos: [0, 0.35, 0], axis: Y },
+  Chest: { pos: [0, 0.35, 0], axis: Y },
+  Neck: { pos: [0, 0.55, 0], axis: Y },
+  Head: { pos: [0, 0.22, 0], axis: Y },
+  LeftShoulder: { pos: [0.28, 0.42, 0], axis: X },
+  LeftUpperArm: { pos: [0.18, 0, 0], axis: X },
+  LeftLowerArm: { pos: [0.9, 0, 0], axis: X },
+  LeftHand: { pos: [0.85, 0, 0], axis: X },
+  RightShoulder: { pos: [-0.28, 0.42, 0], axis: NX },
+  RightUpperArm: { pos: [-0.18, 0, 0], axis: NX },
+  RightLowerArm: { pos: [-0.9, 0, 0], axis: NX },
+  RightHand: { pos: [-0.85, 0, 0], axis: NX },
+  LeftUpperLeg: { pos: [0.17, -0.05, 0], axis: NY },
+  LeftLowerLeg: { pos: [0, -1.0, 0], axis: NY },
+  LeftFoot: { pos: [0, -0.95, 0], axis: new THREE.Vector3(0, -0.25, 1).normalize() },
+  LeftToes: { pos: [0, 0, 0.45], axis: new THREE.Vector3(0, 0, 1) },
+  RightUpperLeg: { pos: [-0.17, -0.05, 0], axis: NY },
+  RightLowerLeg: { pos: [0, -1.0, 0], axis: NY },
+  RightFoot: { pos: [0, -0.95, 0], axis: new THREE.Vector3(0, -0.25, 1).normalize() },
+  RightToes: { pos: [0, 0, 0.45], axis: new THREE.Vector3(0, 0, 1) },
+  LeftThumb: { pos: [0.2, 0.05, 0.12], axis: X }, LeftIndex: { pos: [0.32, 0, 0.05], axis: X },
+  LeftMiddle: { pos: [0.34, 0, 0], axis: X }, LeftRing: { pos: [0.32, 0, -0.05], axis: X }, LeftPinky: { pos: [0.28, 0, -0.1], axis: X },
+  RightThumb: { pos: [-0.2, 0.05, 0.12], axis: NX }, RightIndex: { pos: [-0.32, 0, 0.05], axis: NX },
+  RightMiddle: { pos: [-0.34, 0, 0], axis: NX }, RightRing: { pos: [-0.32, 0, -0.05], axis: NX }, RightPinky: { pos: [-0.28, 0, -0.1], axis: NX },
+  Jaw: { pos: [0, -0.08, 0.06], axis: Y }, LeftEyeLid: { pos: [0.08, 0.04, 0.16], axis: Y },
+  RightEyeLid: { pos: [-0.08, 0.04, 0.16], axis: Y }, LeftBrow: { pos: [0.08, 0.12, 0.16], axis: Y },
+  RightBrow: { pos: [-0.08, 0.12, 0.16], axis: Y }, MouthCorner: { pos: [0, -0.14, 0.16], axis: Y }
+};
+
+/** Build the bone Object3D hierarchy (a THREE.Bone tree) at the given head-unit scale (headH). */
+function buildBoneHierarchy(headH) {
+  const bones = {};
+  for (const name of Object.keys(BONE_PARENT)) {
+    const b = new THREE.Bone(); b.name = name;
+    const r = BONE_REST[name];
+    b.position.set(r.pos[0] * headH, r.pos[1] * headH, r.pos[2] * headH);
+    bones[name] = b;
+  }
+  for (const name of Object.keys(BONE_PARENT)) {
+    const parent = BONE_PARENT[name];
+    if (parent) bones[parent].add(bones[name]); 
+  }
+  bones.Hips.updateMatrixWorld(true);
+  return bones;
+}
+
+const mat = (color, extra) => new THREE.MeshStandardMaterial({ color, roughness: .6, metalness: .05, ...extra });
+
+/** Attach a rigid primitive "flesh" mesh to a bone, offset so it visually spans
+ *  from the bone's origin toward its child along the bone's rest axis. */
+function limb(bones, boneName, childName, radius, taper, color) {
+  const b = bones[boneName], rest = BONE_REST[boneName];
+  const len = childName ? bones[childName].position.length() : radius * 2.2;
+  const geo = new THREE.CapsuleGeometry(radius * (taper ?? 1), Math.max(len - radius * 1.6, .01), 4, 6);
+  const m = new THREE.Mesh(geo, mat(color));
+  m.castShadow = false;
+  const dir = rest.axis.clone().normalize();
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  m.position.copy(dir.clone().multiplyScalar(len / 2));
+  b.add(m);
+  return m;
+}
+function box(bones, boneName, size, color, offset = [0, 0, 0]) {
+  const b = bones[boneName];
+  const m = new THREE.Mesh(new THREE.BoxGeometry(...size), mat(color));
+  m.position.set(...offset); b.add(m); return m;
+}
+function sphere(bones, boneName, r, color, offset = [0, 0, 0]) {
+  const b = bones[boneName];
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 10), mat(color));
+  m.position.set(...offset); b.add(m); return m;
+}
+
+/**
+ * Build one complete procedural character: bone hierarchy + attached primitive
+ * meshes ("puppet" style rigging — segments parented to bones rather than a
+ * skinned mesh, which is cheap on low-end GPUs and needs no vertex weights).
+ * `palette` and `proportions` are what make Human / Robot / Bunny visually
+ * distinct while sharing the exact same bone graph and retargeting code.
+ */
+function buildProceduralCharacter(palette, headH = 0.34) {
+  const bones = buildBoneHierarchy(headH);
+  const root = new THREE.Group(); root.add(bones.Hips);
+  const parts = {};
+
+  // torso
+  parts.spine = box(bones, 'Spine', [headH * .9, headH * .5, headH * .5], palette.pants, [0, headH * .25, 0]);
+  parts.chest = box(bones, 'Chest', [headH * .95, headH * .55, headH * .55], palette.shirt, [0, headH * .28, 0]);
+  parts.neck = limb(bones, 'Neck', 'Head', headH * .16, 1, palette.skin);
+
+  // head + face bits (fallback bone-driven face)
+  parts.head = sphere(bones, 'Head', headH * .62, palette.skin, [0, headH * .35, headH * .04]);
+  if (palette.earType === 'long') {
+    for (const s of [-1, 1]) {
+      const ear = new THREE.Mesh(new THREE.CapsuleGeometry(headH * .1, headH * .75, 4, 6), mat(palette.skin));
+      ear.position.set(s * headH * .22, headH * .95, headH * .05);
+      ear.rotation.z = s * .18;
+      bones.Head.add(ear);
+    }
+  } else if (palette.earType === 'round') {
+    for (const s of [-1, 1]) sphere(bones, 'Head', headH * .16, palette.skin, [s * headH * .52, headH * .55, 0]);
+  } else {
+    for (const s of [-1, 1]) sphere(bones, 'Head', headH * .09, palette.accent, [s * headH * .6, headH * .3, headH * .1]);
+  }
+  const eyeGeo = new THREE.SphereGeometry(headH * .07, 10, 8);
+  for (const s of [-1, 1]) {
+    const eye = new THREE.Mesh(eyeGeo, mat('#241a3d', { roughness: .3 }));
+    eye.position.set(s * headH * .24, headH * .38, headH * .58);
+    bones.Head.add(eye);
+  }
+  const lidGeo = new THREE.BoxGeometry(headH * .17, headH * .17, headH * .04);
+  for (const s of [-1, 1]) {
+    const lid = new THREE.Mesh(lidGeo, mat(palette.skin));
+    lid.position.set(0, 0, 0);
+    lid.scale.y = 0.001; // hidden until blink drives it
+    bones[s < 0 ? 'LeftEyeLid' : 'RightEyeLid'].add(lid);
+    parts[s < 0 ? 'lidL' : 'lidR'] = lid;
+  }
+  const jawGeo = new THREE.BoxGeometry(headH * .34, headH * .16, headH * .18);
+  const jaw = new THREE.Mesh(jawGeo, mat('#4a1730'));
+  bones.Jaw.add(jaw); parts.jaw = jaw;
+  for (const s of [-1, 1]) {
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(headH * .2, headH * .05, headH * .04), mat(palette.hair || '#241a3d'));
+    bones[s < 0 ? 'LeftBrow' : 'RightBrow'].add(brow);
+  }
+
+  // arms
+  for (const [S, side] of [['Left', 1], ['Right', -1]]) {
+    limb(bones, `${S}Shoulder`, `${S}UpperArm`, headH * .16, 1, palette.skin);
+    limb(bones, `${S}UpperArm`, `${S}LowerArm`, headH * .17, 1, palette.sleeve);
+    limb(bones, `${S}LowerArm`, `${S}Hand`, headH * .14, .9, palette.skin);
+    sphere(bones, `${S}Hand`, headH * .16, palette.skin, [side * headH * .1, 0, 0]);
+    for (const f of ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']) {
+      limb(bones, `${S}${f}`, null, headH * .045, 1, palette.skin);
+    }
+  }
+
+  // legs
+  for (const S of ['Left', 'Right']) {
+    limb(bones, `${S}UpperLeg`, `${S}LowerLeg`, headH * .2, 1, palette.pants);
+    limb(bones, `${S}LowerLeg`, `${S}Foot`, headH * .17, .85, palette.pants2 || palette.pants);
+    box(bones, `${S}Foot`, [headH * .22, headH * .16, headH * .5], palette.shoe, [0, -headH * .05, headH * .18]);
+  }
+
+  // emblem
+  if (palette.emblem) {
+    const em = new THREE.Mesh(new THREE.CircleGeometry(headH * .2, 5), mat(palette.accent));
+    em.position.set(0, headH * .15, headH * .28); em.rotation.x = -0.15;
+    bones.Chest.add(em);
+  }
+
+  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  return { root, bones, parts };
+}
+
+// ===== characters.js =====
+// characters.js
+// The character manager. A "character" is always the same shape regardless of
+// where it came from — built-in procedural rig, or an imported GLB:
+//   { id, name, root (THREE.Group), bones (name -> THREE.Object3D), parts, headH }
+// The motion solver / retargeter only ever talks to `bones`, so swapping the
+// character never requires touching tracking or retargeting code.
+
+const PALETTES = {
+  human: { name: 'Pip', skin: '#ffc98f', shirt: '#ff5d8f', sleeve: '#ff5d8f', pants: '#3a6bff', pants2: '#3a6bff', shoe: '#fff3d6', hair: '#5a3524', accent: '#ffd23f', earType: 'ear', emblem: true },
+  robot: { name: 'Bolt', skin: '#c9d3e6', shirt: '#3ee0cf', sleeve: '#3ee0cf', pants: '#6a5cf0', pants2: '#6a5cf0', shoe: '#ffd23f', hair: '#3ee0cf', accent: '#ff5d8f', earType: 'antenna', emblem: true },
+  bunny: { name: 'Bun', skin: '#f6f0ff', shirt: '#ffd23f', sleeve: '#ffd23f', pants: '#7a5cff', pants2: '#7a5cff', shoe: '#ff9ecb', hair: '#ff9ecb', accent: '#ff9ecb', earType: 'long', emblem: true }
+};
+
+function createBuiltins() {
+  const out = {};
+  for (const [id, palette] of Object.entries(PALETTES)) {
+    const c = buildProceduralCharacter(palette);
+    out[id] = { id, name: palette.name, root: c.root, bones: c.bones, parts: c.parts, headH: 0.34, kind: 'procedural' };
+  }
+  return out;
+}
+
+// ---- Custom GLB import -----------------------------------------------------
+// Best-effort mapping from common exporter bone-naming conventions (Mixamo,
+// VRM/Unity Humanoid, generic "mixamorig:" prefixes) onto Mimic's generic
+// bone roles. A GLB only needs to satisfy the core arm/leg/spine names to be
+// puppetable; fingers and face bones are used opportunistically if present.
+const ALIASES = {
+  Hips: ['hips', 'pelvis', 'root'],
+  Spine: ['spine', 'spine1', 'spine01'],
+  Chest: ['spine2', 'chest', 'upperchest', 'spine02'],
+  Neck: ['neck'],
+  Head: ['head'],
+  LeftShoulder: ['leftshoulder', 'lclavicle', 'shoulder_l'],
+  LeftUpperArm: ['leftarm', 'leftupperarm', 'upperarm_l'],
+  LeftLowerArm: ['leftforearm', 'leftlowerarm', 'lowerarm_l'],
+  LeftHand: ['lefthand', 'hand_l'],
+  RightShoulder: ['rightshoulder', 'rclavicle', 'shoulder_r'],
+  RightUpperArm: ['rightarm', 'rightupperarm', 'upperarm_r'],
+  RightLowerArm: ['rightforearm', 'rightlowerarm', 'lowerarm_r'],
+  RightHand: ['righthand', 'hand_r'],
+  LeftUpperLeg: ['leftupleg', 'leftupperleg', 'upperleg_l'],
+  LeftLowerLeg: ['leftleg', 'leftlowerleg', 'lowerleg_l'],
+  LeftFoot: ['leftfoot', 'foot_l'],
+  LeftToes: ['lefttoebase', 'lefttoes', 'toes_l'],
+  RightUpperLeg: ['rightupleg', 'rightupperleg', 'upperleg_r'],
+  RightLowerLeg: ['rightleg', 'rightlowerleg', 'lowerleg_r'],
+  RightFoot: ['rightfoot', 'foot_r'],
+  RightToes: ['righttoebase', 'righttoes', 'toes_r']
+};
+const norm = s => s.toLowerCase().replace(/^mixamorig:?/, '').replace(/[_\s.]/g, '');
+
+function autoMapBones(root) {
+  const found = {};
+  root.traverse(o => {
+    if (!o.isBone && !o.isObject3D) return;
+    const n = norm(o.name || '');
+    if (!n) return;
+    for (const role of BONE_NAMES) {
+      if (found[role]) continue;
+      const cands = ALIASES[role] || [norm(role)];
+      if (cands.some(c => n === c || n.endsWith(c))) found[role] = o;
+    }
+  });
+  return found;
+}
+
+/** Load a user's own GLB/GLTF and try to puppet it with the same rig the
+ *  built-ins use. Returns null (caller should show an error) if no
+ *  recognizable humanoid skeleton is found. */
+async function loadGLBCharacter(url, name = 'Custom') {
+  const loader = new GLTFLoader();
+  const gltf = await loader.loadAsync(url);
+  const scene = gltf.scene || gltf.scenes[0];
+  const bones = autoMapBones(scene);
+  if (!bones.Hips || !bones.Spine || (!bones.LeftUpperArm && !bones.RightUpperArm)) {
+    return null; // not a recognizable humanoid — caller decides how to inform the user
+  }
+  const box = new THREE.Box3().setFromObject(scene);
+  const headH = Math.max((box.max.y - box.min.y) / 7.5, 0.05); // ~7.5 heads tall, rough default
+  scene.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  return { id: 'custom:' + name, name, root: scene, bones, parts: {}, headH, kind: 'glb' };
+}
+
+/** Public interface the app builds a character library around. Real characters
+ *  are procedural today; loadGLB is already the general path so
+ *  "character1.glb, character2.glb, ..." drop in later with no other changes. */
+class CharacterLibrary {
+  constructor() { this.items = createBuiltins(); this.order = Object.keys(this.items); }
+  list() { return this.order.map(id => this.items[id]); }
+  get(id) { return this.items[id]; }
+  async addFromFile(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const ch = await loadGLBCharacter(url, file.name.replace(/\.(glb|gltf)$/i, ''));
+      if (!ch) return null;
+      this.items[ch.id] = ch; this.order.push(ch.id);
+      return ch;
+    } finally { /* URL is revoked by caller once the model no longer needs it */ }
+  }
+}
+
+// ===== tracking.js =====
+// tracking.js
+// TRACKING layer only. Talks to MediaPipe Tasks Vision and nothing else — no
+// Three.js, no bones, no character knowledge. Emits raw normalized landmark
+// data (0..1 image space + MediaPipe's relative z, plus blendshape scores).
+// This is deliberately unchanged in spirit from Mimic's original 2D canvas
+// version: same models, same delegate fallback, same alternating hand/face
+// throttle for low-end phones — only the "draw a 2D puppet" part is gone.
+const CONFIG = {
+  libVersions: ['0.10.14', '0.10.3'],
+  libBase: v => `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${v}`,
+  models: {
+    pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+    hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+    face: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+  }
+};
+
+class Tracker {
+  constructor() {
+    this.pose = null; this.hand = null; this.face = null;
+    this.state = {
+      pose: null, poseAt: -9,
+      hands: { Left: null, Right: null }, // each: {pts:[{x,y,z}]*21, at}
+      face: null // {lm:[{x,y,z}]*~478, bs:{name:score}, at}
+    };
+    this._frame = 0;
+  }
+
+  async init(onStatus = () => {}) {
+    onStatus('Loading tracking library…');
+    let mod, wasm, lastErr;
+    for (const v of CONFIG.libVersions) {
+      try {
+        mod = await import(/* webpackIgnore: true */ `${CONFIG.libBase(v)}/vision_bundle.mjs`);
+        wasm = `${CONFIG.libBase(v)}/wasm`;
+        break;
+      } catch (e) { lastErr = e; }
+    }
+    if (!mod) throw lastErr || new Error('Could not load the tracking library.');
+    const fileset = await mod.FilesetResolver.forVisionTasks(wasm);
+
+    const make = async (Cls, url, extra) => {
+      let err;
+      for (const delegate of ['GPU', 'CPU']) {
+        try {
+          return await Cls.createFromOptions(fileset, {
+            baseOptions: { modelAssetPath: url, delegate },
+            runningMode: 'VIDEO', ...extra
+          });
+        } catch (e) { err = e; console.warn(Cls.name, delegate, e); }
+      }
+      throw err;
+    };
+
+    onStatus('Loading body model…');
+    this.pose = await make(mod.PoseLandmarker, CONFIG.models.pose, { numPoses: 1 });
+    onStatus('Loading hand model…');
+    try { this.hand = await make(mod.HandLandmarker, CONFIG.models.hand, { numHands: 2 }); }
+    catch (e) { console.warn('Hands unavailable', e); }
+    onStatus('Loading face model…');
+    try { this.face = await make(mod.FaceLandmarker, CONFIG.models.face, { numFaces: 1, outputFaceBlendshapes: true }); }
+    catch (e) { console.warn('Face unavailable', e); }
+    return { hasHands: !!this.hand, hasFace: !!this.face };
+  }
+
+  /** Run one detection pass against the current video frame. `opts` toggles
+   *  which optional trackers to spend time on this frame (hands/face
+   *  alternate with each other to keep total inference cost roughly flat). */
+  detect(video, nowMs, opts) {
+    const t = nowMs / 1000;
+    const poseRes = this.pose.detectForVideo(video, nowMs);
+    const lm = poseRes.landmarks && poseRes.landmarks[0];
+    if (lm) {
+      this.state.pose = lm.map(p => ({ x: p.x, y: p.y, z: p.z, v: p.visibility ?? 1 }));
+      this.state.poseAt = t;
+    }
+
+    const jobs = [];
+    if (opts.hands && this.hand) jobs.push('hand');
+    if (opts.face && this.face) jobs.push('face');
+    if (jobs.length) {
+      const job = jobs[this._frame % jobs.length];
+      if (job === 'hand') this._detectHands(video, nowMs, t);
+      else this._detectFace(video, nowMs, t);
+    }
+    this._frame++;
+    return this.state;
+  }
+
+  _detectHands(video, nowMs, t) {
+    const res = this.hand.detectForVideo(video, nowMs);
+    const found = res.landmarks || [];
+    const handed = res.handedness || res.handednesses || [];
+    for (let i = 0; i < found.length; i++) {
+      // MediaPipe reports handedness from the (unmirrored) camera's point of
+      // view; Mimic mirrors the whole rig in the motion solver, so we keep
+      // the raw label here and let the solver decide left/right.
+      const label = handed[i] && handed[i][0] && handed[i][0].categoryName; // 'Left' | 'Right'
+      if (!label) continue;
+      this.state.hands[label] = { pts: found[i].map(p => ({ x: p.x, y: p.y, z: p.z })), at: t };
+    }
+  }
+
+  _detectFace(video, nowMs, t) {
+    const res = this.face.detectForVideo(video, nowMs);
+    const lm = res.faceLandmarks && res.faceLandmarks[0];
+    if (!lm) return;
+    const bs = {};
+    const cats = res.faceBlendshapes && res.faceBlendshapes[0] && res.faceBlendshapes[0].categories;
+    if (cats) for (const c of cats) bs[c.categoryName] = c.score;
+    this.state.face = { lm, bs, at: t };
+  }
+}
+
+// ===== motionSolver.js =====
+// motionSolver.js
+// MOTION SOLVER. Converts raw landmarks into a generic humanoid MotionFrame —
+// bone *rotations*, joint angles and finger curls, never raw coordinates
+// assigned straight to a mesh. A MotionFrame is plain, JSON-serializable data
+// (quaternions as {x,y,z,w}), which is what lets the recorder capture a
+// performance once and replay it later on any character (see recorder.js).
+
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const qToJSON = q => ({ x: q.x, y: q.y, z: q.z, w: q.w });
+
+// Landmark indices, MediaPipe Pose (33-point) — labels are the subject's own
+// anatomical left/right, independent of how the image is mirrored on screen.
+const PI = {
+  nose: 0, earL: 7, earR: 8,
+  shL: 11, shR: 12, elL: 13, elR: 14, wrL: 15, wrR: 16,
+  hipL: 23, hipR: 24, kneeL: 25, kneeR: 26, ankL: 27, ankR: 28, toeL: 31, toeR: 32
+};
+
+function toV3(p, mirror) {
+  const x = mirror ? (1 - p.x) : p.x;
+  return V((x - 0.5) * 2, (0.5 - p.y) * 2, -(p.z || 0) * 2.2);
+}
+
+/** Rotation (as a quaternion) that points a bone's *rest* axis at `dirWorld`,
+ *  expressed in the given parent's accumulated world rotation — i.e. a local
+ *  bone rotation, computed without ever touching THREE's actual scene graph. */
+function swing(restAxis, dirWorld, parentWorldQuat) {
+  const local = dirWorld.clone().applyQuaternion(parentWorldQuat.clone().invert()).normalize();
+  if (local.lengthSq() < 1e-6) return new THREE.Quaternion();
+  return new THREE.Quaternion().setFromUnitVectors(restAxis, local);
+}
+
+const FINGER_CHAINS = {
+  Thumb: [1, 2, 3, 4], Index: [5, 6, 7, 8], Middle: [9, 10, 11, 12], Ring: [13, 14, 15, 16], Pinky: [17, 18, 19, 20]
+};
+
+function fingerCurls(pts) {
+  const wrist = pts[0];
+  const out = {};
+  for (const [name, chain] of Object.entries(FINGER_CHAINS)) {
+    const mcp = pts[chain[0]], tip = pts[chain[chain.length - 1]];
+    const straight = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y, mcp.z - wrist.z) * 3.1; // rough fully-extended length
+    const cur = Math.hypot(tip.x - wrist.x, tip.y - wrist.y, tip.z - wrist.z);
+    out[name] = clamp(1 - cur / Math.max(straight, 1e-4), 0, 1);
+  }
+  return out;
+}
+
+class MotionSolver {
+  constructor() {
+    this.mirror = true;
+    this.calibrated = false;
+    this.baseShoulderY = 0; this.baseHipX = 0; this.baseShoulderW = 0.4;
+  }
+
+  /** Recompute the "neutral standing" reference so root translation (crouch,
+   *  step side to side) is relative to how the user is actually standing. */
+  calibrate(pose) {
+    if (!pose) return;
+    const shL = toV3(pose[PI.shL], this.mirror), shR = toV3(pose[PI.shR], this.mirror);
+    this.baseShoulderY = (shL.y + shR.y) / 2;
+    this.baseHipX = (toV3(pose[PI.hipL], this.mirror).x + toV3(pose[PI.hipR], this.mirror).x) / 2;
+    this.baseShoulderW = Math.max(shL.distanceTo(shR), 0.15);
+    this.calibrated = true;
+  }
+
+  /** state: Tracker.state (raw landmarks). Returns a MotionFrame or null if
+   *  there is no current body detection to build one from. */
+  solve(state, nowSec) {
+    if (!state.pose) return null;
+    if (!this.calibrated) this.calibrate(state.pose);
+    const P = state.pose, mirror = this.mirror;
+    const L = mirror
+      ? { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL }
+      : { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR };
+    const R = mirror
+      ? { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR }
+      : { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL };
+    const v = i => toV3(P[i], mirror);
+
+    const shL = v(L.sh), shR = v(R.sh), hipL = v(L.hip), hipR = v(R.hip);
+    const shMid = shL.clone().add(shR).multiplyScalar(.5);
+    const hipMid = hipL.clone().add(hipR).multiplyScalar(.5);
+    const shoulderW = Math.max(shL.distanceTo(shR), 0.1);
+    const scale = this.baseShoulderW / shoulderW; // rough distance-from-camera compensation
+
+    // ---- root: translate with the user (crouch, lean, step), rotate with torso yaw
+    const root = {
+      x: clamp((hipMid.x - this.baseHipX) * 0.9, -1.4, 1.4),
+      y: clamp((shMid.y - this.baseShoulderY) * 0.9, -0.9, 0.5),
+      z: 0,
+      yaw: clamp(Math.atan2((mirror ? -1 : 1) * (shR.z - shL.z), shoulderW), -1.1, 1.1)
+    };
+
+    // ---- torso direction (hips -> shoulders) drives Spine/Chest together
+    const torsoDir = shMid.clone().sub(hipMid).normalize();
+    const worldQ = { Hips: new THREE.Quaternion().setFromAxisAngle(V(0, 1, 0), root.yaw) };
+    const bones = {};
+    const setBone = (name, parentName, dir) => {
+      const q = swing(BONE_REST[name].axis, dir, worldQ[parentName]);
+      bones[name] = qToJSON(q);
+      worldQ[name] = worldQ[parentName].clone().multiply(q);
+    };
+    setBone('Spine', 'Hips', torsoDir);
+    setBone('Chest', 'Spine', torsoDir);
+    // shoulders stay at rest (identity) — only upper/lower arm swing, which reads
+    // clearly on a stylized puppet without needing clavicle motion
+    worldQ.LeftShoulder = worldQ.Chest; worldQ.RightShoulder = worldQ.Chest;
+    bones.LeftShoulder = qToJSON(new THREE.Quaternion());
+    bones.RightShoulder = qToJSON(new THREE.Quaternion());
+
+    setBone('LeftUpperArm', 'LeftShoulder', v(L.el).sub(shL).normalize());
+    setBone('LeftLowerArm', 'LeftUpperArm', v(L.wr).sub(v(L.el)).normalize());
+    setBone('RightUpperArm', 'RightShoulder', v(R.el).sub(shR).normalize());
+    setBone('RightLowerArm', 'RightUpperArm', v(R.wr).sub(v(R.el)).normalize());
+    // hand orientation follows the forearm unless real hand landmarks override it later
+    bones.LeftHand = qToJSON(new THREE.Quaternion());
+    bones.RightHand = qToJSON(new THREE.Quaternion());
+    worldQ.LeftHand = worldQ.LeftLowerArm; worldQ.RightHand = worldQ.RightLowerArm;
+
+    setBone('LeftUpperLeg', 'Hips', v(L.knee).sub(hipL).normalize());
+    setBone('LeftLowerLeg', 'LeftUpperLeg', v(L.ank).sub(v(L.knee)).normalize());
+    setBone('LeftFoot', 'LeftLowerLeg', v(L.toe).sub(v(L.ank)).normalize());
+    setBone('RightUpperLeg', 'Hips', v(R.knee).sub(hipR).normalize());
+    setBone('RightLowerLeg', 'RightUpperLeg', v(R.ank).sub(v(R.knee)).normalize());
+    setBone('RightFoot', 'RightLowerLeg', v(R.toe).sub(v(R.ank)).normalize());
+    bones.Hips = qToJSON(worldQ.Hips);
+
+    // ---- head: prefer face-derived orientation (below); pose-only fallback
+    const earL = v(PI.earL), earR = v(PI.earR), nose = v(PI.nose);
+    const poseYaw = clamp((nose.x - (earL.x + earR.x) / 2) / Math.max(earL.distanceTo(earR), .05) * .9, -.8, .8);
+    const poseRoll = -Math.atan2(earR.y - earL.y, earR.x - earL.x || 1e-4);
+
+    const frame = {
+      time: nowSec, scale,
+      body: { root, bones },
+      // MediaPipe's hand "Left"/"Right" is anatomical, same convention as the
+      // pose landmarks above — so it needs the same mirror-driven swap as L/R did.
+      leftHand: this._hand(state.hands[mirror ? 'Left' : 'Right'], mirror),
+      rightHand: this._hand(state.hands[mirror ? 'Right' : 'Left'], mirror),
+      face: this._face(state.face, nowSec, poseYaw, poseRoll)
+    };
+    return frame;
+  }
+
+  _hand(h, mirror) {
+    if (!h) return null;
+    return { fingers: fingerCurls(h.pts), at: h.at };
+  }
+
+  _face(f, nowSec, poseYaw, poseRoll) {
+    if (!f || nowSec - f.at > 0.5) return null;
+    const bs = f.bs || {};
+    const g = n => bs[n] || 0;
+    const lm = f.lm;
+    let yaw = poseYaw, pitch = 0, roll = poseRoll;
+    if (lm && lm[234] && lm[454]) {
+      const l = lm[234], r = lm[454], nose = lm[1], top = lm[10], chin = lm[152];
+      yaw = clamp(-((nose.x - (l.x + r.x) / 2) / Math.max(r.x - l.x, 1e-3)) * 1.3, -.8, .8);
+      pitch = clamp(((nose.y - top.y) / Math.max(chin.y - top.y, 1e-3) - 0.6) * 2, -.7, .7);
+      roll = -Math.atan2(r.y - l.y, r.x - l.x);
+    }
+    return {
+      jawOpen: clamp(g('jawOpen') * 1.5, 0, 1),
+      smile: clamp((g('mouthSmileLeft') + g('mouthSmileRight')) * .7, 0, 1),
+      blinkL: clamp((g('eyeBlinkLeft') - .15) / .55, 0, 1),
+      blinkR: clamp((g('eyeBlinkRight') - .15) / .55, 0, 1),
+      browUp: clamp(g('browInnerUp') * 1.4, 0, 1),
+      browDown: clamp((g('browDownLeft') + g('browDownRight')) * .7, 0, 1),
+      eyeX: clamp((g('eyeLookOutLeft') + g('eyeLookInRight') - g('eyeLookInLeft') - g('eyeLookOutRight')) * .5, -1, 1),
+      eyeY: clamp((g('eyeLookUpLeft') + g('eyeLookUpRight') - g('eyeLookDownLeft') - g('eyeLookDownRight')) * .5, -1, 1),
+      yaw, pitch, roll
+    };
+  }
+}
+
+// ===== retarget.js =====
+// retarget.js
+// RETARGETING. The only file that touches both a MotionFrame and an actual
+// character. Everything upstream (tracking, motion solver, recorder) has no
+// idea characters or Three.js bones exist; everything downstream (a
+// character's bones) has no idea MediaPipe exists. This is the seam that
+// lets one performance drive Robot today and a user-imported GLB tomorrow.
+
+const tmpQ = new THREE.Quaternion();
+const BODY_BONES = [
+  'Hips', 'Spine', 'Chest', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand',
+  'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
+];
+const FINGERS = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
+// simplified single-joint fingers: curl bends the bone toward the palm around
+// its local Z; sign differs by hand so "closed fist" looks the same on both.
+const CURL_AXIS = new THREE.Vector3(0, 0, 1), CURL_MAX = 1.35;
+
+/** Per-character smoothing memory, keyed by character id so switching
+ *  characters mid-session doesn't fight stale filter state. */
+const memo = new Map();
+function mem(character) {
+  let m = memo.get(character.id);
+  if (!m) { m = { root: new THREE.Vector3(), yaw: 0, q: {} }; memo.set(character.id, m); }
+  return m;
+}
+
+function slerpRate(dt, halfLifeMs) { return 1 - Math.pow(0.5, (dt * 1000) / halfLifeMs); }
+
+/**
+ * Apply one MotionFrame to `character` for this render tick.
+ * @param character   { root, bones, parts, headH } from characters.js
+ * @param frame        a MotionFrame from motionSolver.js (or null: idle)
+ * @param dt           seconds since last call (for smoothing)
+ * @param opts         { trackHands, trackFace, confidence(0..1) }
+ */
+function applyMotionFrame(character, frame, dt, opts = {}) {
+  const bones = character.bones;
+  const m = mem(character);
+  const conf = opts.confidence ?? 1;
+  const rate = slerpRate(dt, 90);
+
+  if (frame) {
+    // root: position + yaw, in character-local "world" units scaled by head size
+    const h = character.headH;
+    const targetPos = new THREE.Vector3(frame.body.root.x * h * 2, frame.body.root.y * h * 2 + h * 3.1, frame.body.root.z * h * 2);
+    m.root.lerp(targetPos, rate);
+    character.root.position.copy(m.root);
+    m.yaw += (frame.body.root.yaw - m.yaw) * rate;
+    character.root.rotation.y = m.yaw;
+
+    for (const name of BODY_BONES) {
+      const b = bones[name]; if (!b) continue;
+      const j = frame.body.bones[name]; if (!j) continue;
+      tmpQ.set(j.x, j.y, j.z, j.w);
+      const prev = m.q[name] || (m.q[name] = tmpQ.clone());
+      prev.slerp(tmpQ, rate * conf);
+      b.quaternion.copy(prev);
+    }
+
+    if (opts.trackHands) applyHands(bones, frame, m, rate);
+    if (opts.trackFace) applyFace(character, frame.face, m, rate);
+    else idleFace(character, m, rate);
+  } else {
+    idleFace(character, m, rate * 0.3);
+  }
+}
+
+function applyHands(bones, frame, m, rate) {
+  for (const [side, hand] of [['Left', frame.leftHand], ['Right', frame.rightHand]]) {
+    if (!hand) continue;
+    const sign = side === 'Left' ? 1 : -1;
+    for (const f of FINGERS) {
+      const bone = bones[`${side}${f}`]; if (!bone) continue;
+      const curl = hand.fingers[f] ?? 0;
+      const key = `${side}${f}`;
+      const target = new THREE.Quaternion().setFromAxisAngle(CURL_AXIS, sign * curl * CURL_MAX);
+      const prev = m.q[key] || (m.q[key] = target.clone());
+      prev.slerp(target, rate);
+      bone.quaternion.copy(prev);
+    }
+  }
+}
+
+function faceTarget(face) {
+  return face || { jawOpen: 0, smile: .35, blinkL: 0, blinkR: 0, browUp: 0, browDown: 0, eyeX: 0, eyeY: 0, yaw: 0, pitch: 0, roll: 0 };
+}
+
+// Morph-target (blendshape) names commonly used by GLB face rigs; only used
+// if a loaded model actually exposes them (ARKit / VRM-ish naming).
+const MORPH_MAP = { jawOpen: 'jawOpen', smile: ['mouthSmileLeft', 'mouthSmileRight'], blinkL: 'eyeBlinkLeft', blinkR: 'eyeBlinkRight', browUp: 'browInnerUp' };
+
+function applyFace(character, face, m, rate) {
+  const f = faceTarget(face);
+  const bones = character.bones;
+  if (bones.Head) {
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(f.pitch, f.yaw, f.roll, 'YXZ'));
+    const prev = m.q.Head || (m.q.Head = q.clone());
+    prev.slerp(q, rate); bones.Head.quaternion.copy(prev);
+  }
+  if (bones.Jaw) {
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -f.jawOpen * .45);
+    const prev = m.q.Jaw || (m.q.Jaw = q.clone());
+    prev.slerp(q, rate); bones.Jaw.quaternion.copy(prev);
+  }
+  // blendshape path, if this character's mesh has morph targets
+  let usedMorphs = false;
+  character.root.traverse(o => {
+    if (!o.isMesh || !o.morphTargetDictionary) return;
+    usedMorphs = true;
+    setMorph(o, MORPH_MAP.jawOpen, f.jawOpen);
+    setMorph(o, MORPH_MAP.blinkL, f.blinkL);
+    setMorph(o, MORPH_MAP.blinkR, f.blinkR);
+    setMorph(o, MORPH_MAP.browUp, f.browUp);
+    for (const n of MORPH_MAP.smile) setMorph(o, n, f.smile * .8);
+  });
+  // fallback: scale/position simple lid & brow meshes procedurally-built characters carry
+  const parts = character.parts || {};
+  if (!usedMorphs && (parts.lidL || parts.lidR)) {
+    const h = character.headH;
+    if (parts.lidL) parts.lidL.scale.y = Math.max(0.001, f.blinkL);
+    if (parts.lidR) parts.lidR.scale.y = Math.max(0.001, f.blinkR);
+    if (parts.lidL) parts.lidL.position.set(0, h * .38 - f.blinkL * h * .085, h * .6);
+    if (parts.lidR) parts.lidR.position.set(0, h * .38 - f.blinkR * h * .085, h * .6);
+  }
+}
+
+function setMorph(mesh, name, value) {
+  if (!name) return;
+  const idx = mesh.morphTargetDictionary[name];
+  if (idx === undefined || !mesh.morphTargetInfluences) return;
+  mesh.morphTargetInfluences[idx] = value;
+}
+
+function idleFace(character, m, rate) {
+  const t = performance.now() / 1000;
+  const ph = t % 4.2;
+  const blink = ph < .15 ? Math.sin((ph / .15) * Math.PI) : 0;
+  applyFace(character, { jawOpen: 0, smile: .35, blinkL: blink, blinkR: blink, browUp: 0, browDown: 0, yaw: 0, pitch: 0, roll: 0 }, m, rate);
+}
+
+/** Drop smoothing memory for a character (call when switching characters so
+ *  the newly-selected model doesn't inherit another model's filter state). */
+function resetRetarget(character) { memo.delete(character.id); }
+
+// ===== recorder.js =====
+// recorder.js
+// Records the MotionFrame stream itself (not pixels, not a specific
+// character) — { time, body, leftHand, rightHand, face } per frame — so a
+// captured performance can be replayed through the retargeter onto whichever
+// character is selected afterwards, per Mimic's "record once, play on
+// anything" requirement.
+class Recorder {
+  constructor() {
+    this.frames = [];
+    this.recording = false;
+    this.playing = false;
+    this.epoch = null;
+    this.playT = 0;
+    this.speed = 1;
+  }
+
+  get duration() { return this.frames.length ? this.frames[this.frames.length - 1].t : 0; }
+  get hasTake() { return this.frames.length > 1; }
+
+  startRecording() { this.frames = []; this.recording = true; this.epoch = null; this.playing = false; }
+  stopRecording() { this.recording = false; }
+
+  /** Call once per solved MotionFrame while recording is active. */
+  push(frame) {
+    if (!this.recording) return;
+    if (this.epoch === null) this.epoch = frame.time;
+    this.frames.push({ ...frame, t: frame.time - this.epoch });
+  }
+
+  play() { if (this.hasTake) this.playing = true; }
+  pause() { this.playing = false; }
+  restart() { this.playT = 0; }
+  stopPlayback() { this.playing = false; this.playT = 0; }
+  seek(t) { this.playT = Math.max(0, Math.min(this.duration, t)); }
+  setSpeed(s) { this.speed = Math.max(0.1, Math.min(3, s)); }
+
+  /** Advance playback by dt seconds; returns the frame to render this tick,
+   *  or null if there's nothing recorded / playback has stopped. */
+  tick(dt) {
+    if (!this.playing || !this.hasTake) return null;
+    this.playT += dt * this.speed;
+    if (this.playT >= this.duration) { this.playT = this.duration; this.playing = false; }
+    return this.frameAt(this.playT);
+  }
+
+  /** Nearest recorded frame at or before time t (binary search). */
+  frameAt(t) {
+    const f = this.frames;
+    if (!f.length) return null;
+    let lo = 0, hi = f.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (f[mid].t <= t) lo = mid; else hi = mid - 1;
+    }
+    return f[lo];
+  }
+
+  toJSON() { return { frames: this.frames }; }
+  static fromJSON(data) {
+    const r = new Recorder();
+    r.frames = data.frames || [];
+    return r;
+  }
+}
+
+// ===== characterAI.js =====
+// characterAI.js
+// Interface stub for AI-assisted character creation. Deliberately NOT wired
+// to any API key or backend here — a frontend-only app must never hold a key
+// that can generate billable 3D assets. When this is built out, `generate`
+// should call your own backend endpoint (which holds the key), and that
+// endpoint returns a GLB URL this module hands to characters.loadGLBCharacter.
+//
+// This file has no dependency on tracking.js, motionSolver.js or retarget.js
+// on purpose: character creation and real-time puppeteering are separate
+// concerns, and either can change without touching the other.
+const CharacterAI = {
+  /**
+   * Generate a new character mesh from a text prompt.
+   * @param {string} prompt
+   * @returns {Promise<{glbUrl: string, previewUrl?: string}>}
+   */
+  async generateCharacter(prompt) {
+    throw new Error(
+      'AI character generation isn\u2019t connected yet. Wire generateCharacter() ' +
+      'to a backend endpoint that holds your model-generation API key and ' +
+      'returns a GLB URL — never call a generation API directly from the browser.'
+    );
+  },
+
+  /**
+   * Auto-rig a generated (or user-uploaded) mesh with Mimic's generic
+   * humanoid bone set. In production this also calls a backend service;
+   * characters.js's autoMapBones() already does the *matching* half of this
+   * for any GLB that already ships bones under common naming conventions.
+   * @param {string} modelUrl
+   * @returns {Promise<{glbUrl: string}>}
+   */
+  async rigCharacter(modelUrl) {
+    throw new Error('Automatic rigging isn\u2019t connected yet.');
+  },
+
+  /**
+   * Run any final prep a generated character needs before it can join the
+   * library — decimation, texture compression, humanoid bone validation —
+   * so everything handed to characters.js is already Mimic-ready.
+   * @param {string} modelUrl
+   * @returns {Promise<{glbUrl: string, valid: boolean, issues?: string[]}>}
+   */
+  async prepareCharacter(modelUrl) {
+    throw new Error('Character preparation isn\u2019t connected yet.');
+  }
+};
+
+// ===== main.js =====
+// main.js
+// APP / UI layer. This is the only file that wires the independent pieces
+// together for the live experience:
+//   camera -> Tracker (tracking.js) -> MotionSolver (motionSolver.js)
+//     -> [Recorder (recorder.js)] -> applyMotionFrame (retarget.js)
+//     -> CharacterLibrary's current character (characters.js) -> Three.js render
+
+const $ = s => document.querySelector(s);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('mimic3d.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('mimic3d.' + k, JSON.stringify(v)); } catch {} }
+};
+
+/* ---------------------------------------------------------------- scene */
+const stage = $('#stage'), video = $('#video'), overlay = $('#overlay'), og = overlay.getContext('2d');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(32, 1, 0.05, 50);
+const renderer = new THREE.WebGLRenderer({ canvas: $('#gl'), antialias: true, alpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = false; // stylized flat-shaded puppet; skip shadow cost on low-end phones
+
+const holder = new THREE.Group(); scene.add(holder); // user-facing rotate/scale controls live here
+const hemi = new THREE.HemisphereLight('#4c3a94', '#141032', 1.1); scene.add(hemi);
+const key = new THREE.DirectionalLight('#fff3d6', 1.15); key.position.set(1.4, 2.4, 1.8); scene.add(key);
+const rim = new THREE.DirectionalLight('#3ee0cf', .5); rim.position.set(-1.6, .6, -1.2); scene.add(rim);
+
+const groundGeo = new THREE.CircleGeometry(3, 40);
+const ground = new THREE.Mesh(groundGeo, new THREE.MeshStandardMaterial({ color: '#241a3d', roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = 0; ground.visible = store.get('env', true);
+scene.add(ground);
+
+let camDist = store.get('camDist', 3.1);
+function placeCamera() { camera.position.set(0, 1.15, camDist); camera.lookAt(0, 1.0, 0); }
+placeCamera();
+
+function fitCanvas() {
+  const r = stage.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(r.height, 1); camera.updateProjectionMatrix();
+  overlay.width = r.width * renderer.getPixelRatio(); overlay.height = r.height * renderer.getPixelRatio();
+}
+new ResizeObserver(fitCanvas).observe(stage);
+fitCanvas();
+
+/* ------------------------------------------------------------ pipeline */
+const tracker = new Tracker();
+const solver = new MotionSolver();
+const library = new CharacterLibrary();
+const recorder = new Recorder();
+
+const opts = {
+  hands: store.get('hands', true), face: store.get('face', true),
+  cam: store.get('cam', false), skel: store.get('skel', false),
+  mirror: store.get('mirror', true), env: store.get('env', true), transparent: store.get('transparent', false)
+};
+solver.mirror = opts.mirror;
+
+let current = null;
+function selectCharacter(id, { fresh = false } = {}) {
+  const ch = library.get(id); if (!ch) return;
+  if (current) { holder.remove(current.root); resetRetarget(current); }
+  current = ch; holder.add(ch.root);
+  if (fresh) solver.calibrated = false; // re-baseline standing pose for a very different rig size
+  store.set('char', id);
+  document.querySelectorAll('.chip[data-id]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.id === id)));
+}
+
+const charsEl = $('#chars');
+function addChip(ch) {
+  const b = document.createElement('button');
+  b.className = 'chip'; b.dataset.id = ch.id; b.setAttribute('role', 'radio');
+  b.innerHTML = `<span class="dot" style="background:${swatch(ch)}"></span><span>${ch.name}</span>`;
+  b.addEventListener('click', () => selectCharacter(ch.id, { fresh: true }));
+  charsEl.insertBefore(b, $('#addCustom'));
+}
+function swatch(ch) { return { human: '#ff5d8f', robot: '#3ee0cf', bunny: '#ffd23f' }[ch.id] || '#a99fd0'; }
+library.list().forEach(addChip);
+selectCharacter(store.get('char', 'human'));
+
+/* ---------------------------------------------------------------- UI: toggles */
+function applyOpts() {
+  video.style.opacity = opts.cam ? .5 : 0;
+  ground.visible = opts.env;
+  renderer.setClearColor(0x1a1330, opts.transparent ? 0 : 1);
+  stage.classList.toggle('transparent-bg', opts.transparent);
+  solver.mirror = opts.mirror;
+}
+document.querySelectorAll('.tg').forEach(b => {
+  b.setAttribute('aria-pressed', String(opts[b.dataset.k]));
+  b.addEventListener('click', () => {
+    const k = b.dataset.k; opts[k] = !opts[k];
+    b.setAttribute('aria-pressed', String(opts[k])); store.set(k, opts[k]); applyOpts();
+    if (k === 'mirror') solver.calibrated = false;
+    if (b.classList.contains('switch')) {
+      const labels = { mirror: ['On', 'Off'], env: ['Ground', 'Off'], transparent: ['On', 'Off'] };
+      const [on, off] = labels[k] || ['On', 'Off'];
+      b.textContent = opts[k] ? on : off;
+    }
+  });
+});
+applyOpts();
+$('#addCustom').addEventListener('click', () => $('#customFile').click());
+
+const rotSlider = $('#rot'), scaleSlider = $('#scale'), distSlider = $('#dist');
+rotSlider.value = store.get('rot', 0); scaleSlider.value = store.get('scale', 100); distSlider.value = camDist * 100;
+function applySliders() {
+  holder.rotation.y = (+rotSlider.value) * Math.PI / 180;
+  const s = (+scaleSlider.value) / 100; holder.scale.setScalar(s);
+  camDist = (+distSlider.value) / 100; placeCamera();
+}
+[rotSlider, scaleSlider, distSlider].forEach(el => el.addEventListener('input', () => {
+  store.set('rot', +rotSlider.value); store.set('scale', +scaleSlider.value); store.set('camDist', camDist);
+  applySliders();
+}));
+applySliders();
+
+$('#customFile').addEventListener('change', async e => {
+  const file = e.target.files[0]; if (!file) return;
+  say('Loading character…');
+  try {
+    const ch = await library.addFromFile(file);
+    if (!ch) { say('That file doesn\u2019t look like a rigged humanoid Mimic can recognize.', true); return; }
+    addChip(ch); selectCharacter(ch.id, { fresh: true }); say('');
+  } catch (err) { console.error(err); say('Couldn\u2019t load that GLB file.', true); }
+  e.target.value = '';
+});
+
+/* -------------------------------------------------------------- record/play */
+const recBtn = $('#rec'), playBtn = $('#play'), restartBtn = $('#restart'), timeline = $('#timeline'), speed = $('#speed');
+function refreshTransportUI() {
+  recBtn.setAttribute('aria-pressed', String(recorder.recording));
+  recBtn.textContent = recorder.recording ? '■ Stop' : '● Rec';
+  playBtn.disabled = !recorder.hasTake;
+  playBtn.textContent = recorder.playing ? '⏸ Pause' : '▶ Play';
+  restartBtn.disabled = !recorder.hasTake;
+  timeline.disabled = !recorder.hasTake;
+  timeline.max = String(Math.max(recorder.duration, 0.01));
+  if (!scrubbing) timeline.value = String(recorder.playT);
+}
+let scrubbing = false;
+recBtn.addEventListener('click', () => {
+  if (recorder.recording) recorder.stopRecording();
+  else { recorder.startRecording(); recorder.playing = false; }
+  refreshTransportUI();
+});
+playBtn.addEventListener('click', () => { recorder.playing ? recorder.pause() : recorder.play(); refreshTransportUI(); });
+restartBtn.addEventListener('click', () => { recorder.restart(); refreshTransportUI(); });
+timeline.addEventListener('input', () => { scrubbing = true; recorder.seek(+timeline.value); recorder.playing = false; refreshTransportUI(); });
+timeline.addEventListener('change', () => { scrubbing = false; });
+speed.addEventListener('input', () => recorder.setSpeed(+speed.value));
+refreshTransportUI();
+
+/* -------------------------------------------------------------- status pill */
+const pill = $('#pill'), pillTxt = $('#pillTxt');
+function setPill(txt, cls) { pillTxt.textContent = txt; pill.className = cls || ''; }
+const msg = $('#msg');
+function say(t, err) { msg.textContent = t; msg.className = err ? 'err' : ''; }
+
+/* -------------------------------------------------------------------- loop */
+let running = false, lastVT = -1, lastNow = 0, fpsT = 0, detCount = 0, frameParity = 0;
+function loop(now) {
+  if (!running) return;
+  requestAnimationFrame(loop);
+  const dt = lastNow ? Math.min((now - lastNow) / 1000, 0.1) : 1 / 60; lastNow = now;
+
+  let liveFrame = null;
+  if (video.readyState >= 2 && video.currentTime !== lastVT) {
+    lastVT = video.currentTime;
+    try {
+      const state = tracker.detect(video, now, { hands: opts.hands, face: opts.face });
+      liveFrame = solver.solve(state, now / 1000);
+      if (liveFrame && recorder.recording) recorder.push(liveFrame);
+      detCount++;
+    } catch (e) { console.error('Detection error', e); }
+  }
+
+  // Advancing the recorder here (rather than just reading it) is what makes
+  // playback its own clock, independent of the live camera frame rate.
+  recorder.tick(dt);
+  const usingPlayback = recorder.playing;
+  const activeFrame = usingPlayback ? recorder.frameAt(recorder.playT) : liveFrame;
+  const trackingAgeOk = !!liveFrame || usingPlayback;
+  applyMotionFrame(current, activeFrame, dt, { trackHands: opts.hands, trackFace: opts.face, confidence: 1 });
+
+  renderer.render(scene, camera);
+  if (opts.skel) drawSkeleton();
+
+  if (now - fpsT > 700) {
+    const fps = Math.round(detCount * 1000 / (now - fpsT)); detCount = 0; fpsT = now;
+    if (usingPlayback) setPill(`Playing take \u00b7 ${recorder.playT.toFixed(1)}s / ${recorder.duration.toFixed(1)}s`, 'live');
+    else if (recorder.recording) setPill(`\u25cf Recording \u00b7 ${recorder.frames.length ? recorder.frames[recorder.frames.length - 1].t.toFixed(1) : '0.0'}s`, 'warn');
+    else if (!trackingAgeOk) setPill('Can\u2019t see you \u2014 step back so your shoulders are in view', 'warn');
+    else setPill(`Tracking \u00b7 ${fps} fps`, 'live');
+    refreshTransportUI();
+  } else if (usingPlayback) {
+    refreshTransportUI();
+  }
+}
+
+function drawSkeleton() {
+  const dpr = renderer.getPixelRatio(); const w = overlay.width, h = overlay.height;
+  og.clearRect(0, 0, w, h);
+  const st = tracker.state.pose; if (!st) return;
+  const mirror = opts.mirror;
+  og.lineWidth = 2 * dpr; og.strokeStyle = 'rgba(62,224,207,.85)'; og.fillStyle = '#3ee0cf';
+  const P = i => { const p = st[i]; const x = mirror ? 1 - p.x : p.x; return [x * w, p.y * h]; };
+  const LINES = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28]];
+  for (const [a, b] of LINES) {
+    if (st[a].v < .4 || st[b].v < .4) continue;
+    const [ax, ay] = P(a), [bx, by] = P(b);
+    og.beginPath(); og.moveTo(ax, ay); og.lineTo(bx, by); og.stroke();
+  }
+  for (let i = 0; i < 33; i++) if (st[i].v > .4) { const [x, y] = P(i); og.beginPath(); og.arc(x, y, 3 * dpr, 0, Math.PI * 2); og.fill(); }
+}
+
+/* ------------------------------------------------------------------ start */
+const startBtn = $('#start'), intro = $('#intro');
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true; say('');
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.isSecureContext) {
+      throw Object.assign(new Error('The camera only works on https:// or localhost. Host this on GitHub Pages / Vercel, or open it from localhost.'), { plain: true });
+    }
+    say('Starting camera\u2026');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+    video.srcObject = stream; await video.play();
+
+    const { hasHands, hasFace } = await tracker.init(t => say(t));
+    document.querySelector('[data-k="hands"]').disabled = !hasHands;
+    document.querySelector('[data-k="face"]').disabled = !hasFace;
+    if (!hasHands || !hasFace) setPill(`${!hasHands ? 'Hands' : 'Face'} tracking unavailable on this device`, 'warn');
+
+    intro.hidden = true; running = true; fpsT = performance.now();
+    requestAnimationFrame(loop);
+  } catch (e) {
+    console.error(e);
+    let text = e.message || 'Something went wrong.';
+    if (e.name === 'NotAllowedError') text = 'Camera access was blocked. Allow the camera for this site, then try again.';
+    else if (e.name === 'NotFoundError') text = 'No camera found on this device.';
+    else if (e.name === 'NotReadableError') text = 'The camera is busy. Close other apps using it and try again.';
+    else if (!e.plain) text = 'Couldn\u2019t load the tracking models. Check your connection and try again. (' + text + ')';
+    say(text, true);
+    startBtn.disabled = false; startBtn.textContent = 'Try again';
+  }
+});
+
+</script>
+</body>
+</html>
