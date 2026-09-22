@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1330">
+<title>Mimic – 3D camera puppet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="stageWrap">
+    <div id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="gl"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="pill" role="status"><i></i><span id="pillTxt">Ready</span></div>
+
+    <div id="intro">
+      <div class="card">
+        <h1>Mimic</h1>
+        <p>Move, wave, make a face. A 3D cartoon character copies your body, hands and expressions in real time.</p>
+        <p class="fine">Tracking runs inside this browser. Your video is never uploaded.</p>
+        <button id="start">Start camera</button>
+        <p id="msg" role="alert"></p>
+      </div>
+    </div>
+  </div>
+
+  <div id="tray">
+    <div id="chars" role="radiogroup" aria-label="Character">
+      <button id="addCustom" class="chip" type="button">
+        <span class="dot">+</span><span>Import GLB</span>
+      </button>
+    </div>
+    <input id="customFile" type="file" accept=".glb,.gltf">
+
+    <div id="toggles">
+      <button class="tg" data-k="hands" aria-pressed="true">Hands</button>
+      <button class="tg" data-k="face" aria-pressed="true">Face</button>
+      <button class="tg" data-k="cam" aria-pressed="false">Camera</button>
+      <button class="tg" data-k="skel" aria-pressed="false">Skeleton</button>
+    </div>
+
+    <div class="row-label">Record</div>
+    <div id="transport">
+      <button id="rec" type="button">● Rec</button>
+      <button id="play" type="button" disabled>▶ Play</button>
+      <button id="restart" type="button" disabled>⟲</button>
+      <input id="timeline" type="range" min="0" max="1" step="0.01" value="0" disabled aria-label="Playback position">
+      <input id="speed" type="number" min="0.25" max="2" step="0.25" value="1" aria-label="Playback speed">
+    </div>
+
+    <details id="settings">
+      <summary>Settings</summary>
+      <div class="setting">
+        <span>Mirror mode</span>
+        <button class="tg switch" data-k="mirror" aria-pressed="true">On</button>
+      </div>
+      <div class="setting">
+        <span>Environment</span>
+        <button class="tg switch" data-k="env" aria-pressed="true">Ground</button>
+      </div>
+      <div class="setting">
+        <span>Transparent bg</span>
+        <button class="tg switch" data-k="transparent" aria-pressed="false">Off</button>
+      </div>
+      <div class="setting">Rotate <input id="rot" type="range" min="-180" max="180" value="0"></div>
+      <div class="setting">Scale <input id="scale" type="range" min="50" max="160" value="100"></div>
+      <div class="setting">Distance <input id="dist" type="range" min="180" max="500" value="310"></div>
+    </details>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
