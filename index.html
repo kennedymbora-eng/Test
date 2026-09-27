@@ -169,6 +169,10 @@ details#settings summary::-webkit-details-marker{display:none}
       <div class="setting">Rotate <input id="rot" type="range" min="-180" max="180" value="0"></div>
       <div class="setting">Scale <input id="scale" type="range" min="50" max="160" value="100"></div>
       <div class="setting">Distance <input id="dist" type="range" min="180" max="500" value="310"></div>
+      <div class="setting">
+        <span>Tracking drifting?</span>
+        <button id="recal" class="tg" type="button">Recalibrate</button>
+      </div>
     </details>
   </div>
 </div>
@@ -492,7 +496,10 @@ const CONFIG = {
   libVersions: ['0.10.14', '0.10.3'],
   libBase: v => `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${v}`,
   models: {
-    pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+    // 'full' trades a bit of speed for meaningfully better joint accuracy
+    // than 'lite' — the same tradeoff workout-tracking apps make, since a
+    // skeleton that reads correctly matters more than a few extra fps.
+    pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
     hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
     face: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
   }
@@ -536,7 +543,13 @@ class Tracker {
     };
 
     onStatus('Loading body model…');
-    this.pose = await make(mod.PoseLandmarker, CONFIG.models.pose, { numPoses: 1 });
+    try {
+      this.pose = await make(mod.PoseLandmarker, CONFIG.models.pose, { numPoses: 1 });
+    } catch (e) {
+      console.warn('Full pose model failed, falling back to lite', e);
+      const liteUrl = CONFIG.models.pose.replace('_full', '_lite');
+      this.pose = await make(mod.PoseLandmarker, liteUrl, { numPoses: 1 });
+    }
     onStatus('Loading hand model…');
     try { this.hand = await make(mod.HandLandmarker, CONFIG.models.hand, { numHands: 2 }); }
     catch (e) { console.warn('Hands unavailable', e); }
@@ -602,10 +615,22 @@ class Tracker {
 // assigned straight to a mesh. A MotionFrame is plain, JSON-serializable data
 // (quaternions as {x,y,z,w}), which is what lets the recorder capture a
 // performance once and replay it later on any character (see recorder.js).
+//
+// Two things make tracking feel steadier, borrowed from how workout-tracking
+// apps keep a skeleton readable during fast reps:
+//   1. Visibility gating + angular-velocity clamping (DirFilter below) — a
+//      limb's direction only updates from landmarks MediaPipe is actually
+//      confident about, and can't swing further than is physically plausible
+//      in one frame, so a single bad detection can't snap a limb somewhere
+//      impossible.
+//   2. Continuous adaptive calibration — the "neutral standing" reference
+//      keeps drifting slowly toward you instead of being fixed from frame
+//      one, so it keeps up if you step back or the camera moves.
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const qToJSON = q => ({ x: q.x, y: q.y, z: q.z, w: q.w });
+const VIS_MIN = 0.45; // below this, MediaPipe itself isn't confident — don't trust the position
 
 // Landmark indices, MediaPipe Pose (33-point) — labels are the subject's own
 // anatomical left/right, independent of how the image is mirrored on screen.
@@ -629,6 +654,31 @@ function swing(restAxis, dirWorld, parentWorldQuat) {
   return new THREE.Quaternion().setFromUnitVectors(restAxis, local);
 }
 
+/** Per-joint direction filter: ignores updates while confidence is low
+ *  (freezes on the last good direction instead of jumping to a noisy one),
+ *  and caps how many radians/sec a direction is allowed to swing so one bad
+ *  frame can't teleport a limb — the same "impossible movement" rejection a
+ *  rep-counting fitness app uses to stop a glitchy frame from miscounting a rep. */
+class DirFilter {
+  constructor(maxDegPerSec = 900) { this.maxRad = maxDegPerSec * Math.PI / 180; this.dir = null; }
+  update(confident, target, dt) {
+    if (!confident) return this.dir ? this.dir.clone() : target;
+    if (!this.dir) { this.dir = target.clone(); return this.dir.clone(); }
+    const angle = this.dir.angleTo(target);
+    const maxStep = this.maxRad * Math.max(dt, 1 / 90);
+    if (angle > maxStep && angle > 1e-4) {
+      const axis = this.dir.clone().cross(target);
+      if (axis.lengthSq() > 1e-8) {
+        axis.normalize();
+        this.dir.applyAxisAngle(axis, maxStep).normalize();
+      } else { this.dir.copy(target); }
+    } else {
+      this.dir.copy(target);
+    }
+    return this.dir.clone();
+  }
+}
+
 const FINGER_CHAINS = {
   Thumb: [1, 2, 3, 4], Index: [5, 6, 7, 8], Middle: [9, 10, 11, 12], Ring: [13, 14, 15, 16], Pinky: [17, 18, 19, 20]
 };
@@ -650,25 +700,49 @@ class MotionSolver {
     this.mirror = true;
     this.calibrated = false;
     this.baseShoulderY = 0; this.baseHipX = 0; this.baseShoulderW = 0.4;
+    this._lastT = null;
+    this._filters = {}; // joint key -> DirFilter, built lazily
   }
 
-  /** Recompute the "neutral standing" reference so root translation (crouch,
-   *  step side to side) is relative to how the user is actually standing. */
-  calibrate(pose) {
+  _filter(key) { return this._filters[key] || (this._filters[key] = new DirFilter()); }
+
+  /** Force the next solve() to hard-reset the standing baseline instead of
+   *  easing toward it — call this from a "Recalibrate" button while the
+   *  user stands in a relaxed neutral pose, the same UX a fitness app uses. */
+  recalibrate() { this.calibrated = false; }
+
+  /** Keep the "neutral standing" reference current. On the very first good
+   *  frame it snaps to you; after that it eases toward you slowly (~6s time
+   *  constant) so normal movement never drags it around, but real drift —
+   *  stepping back, the phone getting bumped — is absorbed within a few
+   *  seconds instead of staying wrong for the rest of the session. */
+  calibrate(pose, dt) {
     if (!pose) return;
     const shL = toV3(pose[PI.shL], this.mirror), shR = toV3(pose[PI.shR], this.mirror);
-    this.baseShoulderY = (shL.y + shR.y) / 2;
-    this.baseHipX = (toV3(pose[PI.hipL], this.mirror).x + toV3(pose[PI.hipR], this.mirror).x) / 2;
-    this.baseShoulderW = Math.max(shL.distanceTo(shR), 0.15);
-    this.calibrated = true;
+    if (pose[PI.shL].v < VIS_MIN || pose[PI.shR].v < VIS_MIN) return;
+    const y = (shL.y + shR.y) / 2;
+    const x = (toV3(pose[PI.hipL], this.mirror).x + toV3(pose[PI.hipR], this.mirror).x) / 2;
+    const w = Math.max(shL.distanceTo(shR), 0.15);
+    if (!this.calibrated) {
+      this.baseShoulderY = y; this.baseHipX = x; this.baseShoulderW = w; this.calibrated = true;
+    } else {
+      const a = clamp((dt ?? 1 / 30) / 6, 0, 0.05);
+      this.baseShoulderY += (y - this.baseShoulderY) * a;
+      this.baseHipX += (x - this.baseHipX) * a;
+      this.baseShoulderW += (w - this.baseShoulderW) * a;
+    }
   }
 
   /** state: Tracker.state (raw landmarks). Returns a MotionFrame or null if
    *  there is no current body detection to build one from. */
   solve(state, nowSec) {
     if (!state.pose) return null;
-    if (!this.calibrated) this.calibrate(state.pose);
+    const dt = this._lastT === null ? 1 / 30 : clamp(nowSec - this._lastT, 0, 0.25);
+    this._lastT = nowSec;
+    this.calibrate(state.pose, dt);
+
     const P = state.pose, mirror = this.mirror;
+    const vis = i => P[i].v;
     const L = mirror
       ? { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL }
       : { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR };
@@ -684,15 +758,16 @@ class MotionSolver {
     const scale = this.baseShoulderW / shoulderW; // rough distance-from-camera compensation
 
     // ---- root: translate with the user (crouch, lean, step), rotate with torso yaw
+    const rootConfident = vis(L.sh) > VIS_MIN && vis(R.sh) > VIS_MIN && vis(L.hip) > VIS_MIN && vis(R.hip) > VIS_MIN;
     const root = {
       x: clamp((hipMid.x - this.baseHipX) * 0.9, -1.4, 1.4),
       y: clamp((shMid.y - this.baseShoulderY) * 0.9, -0.9, 0.5),
       z: 0,
-      yaw: clamp(Math.atan2((mirror ? -1 : 1) * (shR.z - shL.z), shoulderW), -1.1, 1.1)
+      yaw: rootConfident ? clamp(Math.atan2((mirror ? -1 : 1) * (shR.z - shL.z), shoulderW), -1.1, 1.1) : 0
     };
 
     // ---- torso direction (hips -> shoulders) drives Spine/Chest together
-    const torsoDir = shMid.clone().sub(hipMid).normalize();
+    const torsoDir = this._filter('torso').update(rootConfident, shMid.clone().sub(hipMid).normalize(), dt);
     const worldQ = { Hips: new THREE.Quaternion().setFromAxisAngle(V(0, 1, 0), root.yaw) };
     const bones = {};
     const setBone = (name, parentName, dir) => {
@@ -708,21 +783,24 @@ class MotionSolver {
     bones.LeftShoulder = qToJSON(new THREE.Quaternion());
     bones.RightShoulder = qToJSON(new THREE.Quaternion());
 
-    setBone('LeftUpperArm', 'LeftShoulder', v(L.el).sub(shL).normalize());
-    setBone('LeftLowerArm', 'LeftUpperArm', v(L.wr).sub(v(L.el)).normalize());
-    setBone('RightUpperArm', 'RightShoulder', v(R.el).sub(shR).normalize());
-    setBone('RightLowerArm', 'RightUpperArm', v(R.wr).sub(v(R.el)).normalize());
+    const dir = (key, a, b, visA, visB) =>
+      this._filter(key).update(visA > VIS_MIN && visB > VIS_MIN, v(b).sub(v(a)).normalize(), dt);
+
+    setBone('LeftUpperArm', 'LeftShoulder', dir('ua_L', L.sh, L.el, vis(L.sh), vis(L.el)));
+    setBone('LeftLowerArm', 'LeftUpperArm', dir('la_L', L.el, L.wr, vis(L.el), vis(L.wr)));
+    setBone('RightUpperArm', 'RightShoulder', dir('ua_R', R.sh, R.el, vis(R.sh), vis(R.el)));
+    setBone('RightLowerArm', 'RightUpperArm', dir('la_R', R.el, R.wr, vis(R.el), vis(R.wr)));
     // hand orientation follows the forearm unless real hand landmarks override it later
     bones.LeftHand = qToJSON(new THREE.Quaternion());
     bones.RightHand = qToJSON(new THREE.Quaternion());
     worldQ.LeftHand = worldQ.LeftLowerArm; worldQ.RightHand = worldQ.RightLowerArm;
 
-    setBone('LeftUpperLeg', 'Hips', v(L.knee).sub(hipL).normalize());
-    setBone('LeftLowerLeg', 'LeftUpperLeg', v(L.ank).sub(v(L.knee)).normalize());
-    setBone('LeftFoot', 'LeftLowerLeg', v(L.toe).sub(v(L.ank)).normalize());
-    setBone('RightUpperLeg', 'Hips', v(R.knee).sub(hipR).normalize());
-    setBone('RightLowerLeg', 'RightUpperLeg', v(R.ank).sub(v(R.knee)).normalize());
-    setBone('RightFoot', 'RightLowerLeg', v(R.toe).sub(v(R.ank)).normalize());
+    setBone('LeftUpperLeg', 'Hips', dir('ul_L', L.hip, L.knee, vis(L.hip), vis(L.knee)));
+    setBone('LeftLowerLeg', 'LeftUpperLeg', dir('ll_L', L.knee, L.ank, vis(L.knee), vis(L.ank)));
+    setBone('LeftFoot', 'LeftLowerLeg', dir('ft_L', L.ank, L.toe, vis(L.ank), vis(L.toe)));
+    setBone('RightUpperLeg', 'Hips', dir('ul_R', R.hip, R.knee, vis(R.hip), vis(R.knee)));
+    setBone('RightLowerLeg', 'RightUpperLeg', dir('ll_R', R.knee, R.ank, vis(R.knee), vis(R.ank)));
+    setBone('RightFoot', 'RightLowerLeg', dir('ft_R', R.ank, R.toe, vis(R.ank), vis(R.toe)));
     bones.Hips = qToJSON(worldQ.Hips);
 
     // ---- head: prefer face-derived orientation (below); pose-only fallback
@@ -1150,6 +1228,12 @@ function applySliders() {
   applySliders();
 }));
 applySliders();
+
+$('#recal').addEventListener('click', () => {
+  solver.recalibrate();
+  say('Recalibrated \u2014 stand naturally and give it a second.');
+  setTimeout(() => { if (msg.textContent.startsWith('Recalibrated')) say(''); }, 2000);
+});
 
 $('#customFile').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
