@@ -88,6 +88,9 @@ details#settings summary::-webkit-details-marker{display:none}
 .setting button{padding:6px 12px;border-radius:999px;background:var(--ink-2);color:var(--text);font-size:13px}
 .setting .switch[aria-pressed="true"]{background:var(--mint);color:var(--ink)}
 #customFile{display:none}
+#glbDebug{font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--mint);
+  background:var(--ink-3);border-radius:12px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;
+  max-height:120px;overflow-y:auto;margin:0}
 
 @media (min-width:820px){
   #app{flex-direction:row-reverse;padding-top:0}
@@ -142,6 +145,7 @@ details#settings summary::-webkit-details-marker{display:none}
       <button class="tg" data-k="cam" aria-pressed="false">Camera</button>
       <button class="tg" data-k="skel" aria-pressed="false">Skeleton</button>
     </div>
+    <pre id="glbDebug" hidden></pre>
 
     <div class="row-label">Record</div>
     <div id="transport">
@@ -381,6 +385,284 @@ function buildProceduralCharacter(palette, headH = 0.34) {
   return { root, bones, parts };
 }
 
+// ===== glbRetarget.js =====
+// glbRetarget.js
+// Calibration + retargeting for IMPORTED GLB/GLTF characters only. The
+// procedural characters (skeleton.js/characters.js) and the existing
+// retarget.js they use are untouched by this file — a GLB character is
+// visually and structurally nothing like Mimic's procedural puppet (its
+// bones don't rest at identity rotation, its axes point wherever the artist
+// built them), so it needs its own path rather than reusing retarget.js's
+// "rest = identity" assumption.
+//
+// The core idea, in one sentence: MotionFrame's per-role quaternions already
+// describe "rotate this body segment THIS MUCH relative to a neutral T-pose,
+// expressed in world space" — so retargeting onto any bone is just "apply
+// that same world-space delta on top of THIS bone's own rest-pose world
+// orientation", converted back into whatever the bone's actual local space
+// is. That conversion is what calibration measures once, up front.
+
+const GLB_FINGERS = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
+const GLB_CURL_AXIS = new THREE.Vector3(0, 0, 1), GLB_CURL_MAX = 1.35;
+
+// Canonical "which bone this one aims at", used only to recover each bone's
+// own rest-pose aim direction — NOT the render hierarchy (BONE_PARENT already
+// covers that). Roles left out (Head, hands, toes, fingers) have no further
+// bone to aim at, so they simply hold their rest orientation until something
+// else (face data, finger curl) drives them.
+const AIM_CHILD = {
+  Hips: 'Spine', Spine: 'Chest', Chest: 'Neck', Neck: 'Head',
+  LeftShoulder: 'LeftUpperArm', LeftUpperArm: 'LeftLowerArm', LeftLowerArm: 'LeftHand',
+  RightShoulder: 'RightUpperArm', RightUpperArm: 'RightLowerArm', RightLowerArm: 'RightHand',
+  LeftUpperLeg: 'LeftLowerLeg', LeftLowerLeg: 'LeftFoot', LeftFoot: 'LeftToes',
+  RightUpperLeg: 'RightLowerLeg', RightLowerLeg: 'RightFoot', RightFoot: 'RightToes'
+};
+
+// Topological processing order for the main body chain (parent always
+// appears before its children — required for the world-quaternion chaining
+// below to read a correct, already-updated parent orientation).
+const BODY_CHAIN = [
+  'Hips', 'Spine', 'Chest', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand',
+  'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
+];
+
+function glbDist(a, b) { return (a && b) ? a.distanceTo(b) : null; }
+
+/**
+ * Measure everything the retargeter needs from a freshly-loaded, still-in-
+ * rest-pose GLB skeleton. Must run before anything else touches the bones —
+ * calibration reads rest-pose world transforms, so if a bone has already
+ * been rotated once, its "rest" data is wrong from then on. Returns the
+ * calibration record described in the spec (bones, boneMap, restPose,
+ * proportions, scale, groundOffset, height, calibrated) plus the internal
+ * per-role rest data the retargeter needs each frame.
+ */
+function calibrateGLBCharacter(root, boneMap) {
+  root.updateMatrixWorld(true); // lock in rest-pose world transforms before measuring anything
+
+  const restWorldQuat = {}, restWorldPos = {};
+  for (const role of Object.keys(boneMap)) {
+    const b = boneMap[role];
+    restWorldQuat[role] = b.getWorldQuaternion(new THREE.Quaternion());
+    restWorldPos[role] = b.getWorldPosition(new THREE.Vector3());
+  }
+
+  // Each mapped bone's own "forward" axis, in ITS OWN rest-local frame —
+  // derived from WORLD rest positions, so it stays correct even when the
+  // GLB inserts extra unmapped bones (twist bones etc.) between two mapped
+  // roles. This is the per-character equivalent of skeleton.js's hardcoded
+  // BONE_REST.axis table, measured instead of assumed.
+  const restAxisLocal = {};
+  for (const role of Object.keys(boneMap)) {
+    const child = AIM_CHILD[role];
+    if (!child || !boneMap[child]) continue;
+    const dir = restWorldPos[child].clone().sub(restWorldPos[role]);
+    if (dir.lengthSq() < 1e-10) continue;
+    dir.normalize();
+    restAxisLocal[role] = dir.applyQuaternion(restWorldQuat[role].clone().invert()).normalize();
+  }
+
+  // Proportions (spec #5) — purely descriptive/diagnostic today (surfaced in
+  // the Skeleton debug panel) except height and groundOffset, which drive
+  // translation scale and grounding below.
+  const proportions = {
+    shoulderWidth: glbDist(restWorldPos.LeftShoulder, restWorldPos.RightShoulder) ?? glbDist(restWorldPos.LeftUpperArm, restWorldPos.RightUpperArm),
+    hipWidth: glbDist(restWorldPos.LeftUpperLeg, restWorldPos.RightUpperLeg),
+    upperArmLength: glbDist(restWorldPos.LeftUpperArm, restWorldPos.LeftLowerArm),
+    forearmLength: glbDist(restWorldPos.LeftLowerArm, restWorldPos.LeftHand),
+    upperLegLength: glbDist(restWorldPos.LeftUpperLeg, restWorldPos.LeftLowerLeg),
+    lowerLegLength: glbDist(restWorldPos.LeftLowerLeg, restWorldPos.LeftFoot),
+    footLength: glbDist(restWorldPos.LeftFoot, restWorldPos.LeftToes)
+  };
+
+  // Height + ground reference, from actual mesh geometry rather than a
+  // guessed constant — this is what "#10, #12: keep feet grounded, no fixed
+  // Y offset" comes down to: measure where the feet/floor of the mesh
+  // actually sit at rest, relative to the root's own origin, once.
+  let minY = Infinity, maxY = -Infinity;
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const box = new THREE.Box3().setFromObject(o);
+    if (box.min.y < minY) minY = box.min.y;
+    if (box.max.y > maxY) maxY = box.max.y;
+  });
+  if (!isFinite(minY)) { minY = 0; maxY = 1; } // degenerate/empty mesh — fall back rather than break
+  const height = Math.max(maxY - minY, 0.05);
+  const groundWorldY = minY; // lowest point of the actual mesh at rest = the floor, whatever the rig's ankle placement is
+  const groundOffset = groundWorldY - root.position.y; // feet depth below the root's own origin — constant regardless of where root.position sits when this runs
+  const hipsHeight = restWorldPos.Hips ? (restWorldPos.Hips.y - groundWorldY) : height * 0.55;
+
+  const missing = ['Hips', 'Spine', 'Chest', 'Neck', 'Head',
+    'LeftUpperArm', 'LeftLowerArm', 'LeftHand', 'RightUpperArm', 'RightLowerArm', 'RightHand',
+    'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
+  ].filter(r => !boneMap[r]);
+
+  return {
+    bones: boneMap, boneMap, restPose: { restWorldQuat, restWorldPos },
+    restWorldQuat, restWorldPos, restAxisLocal,
+    proportions, scale: height / 1.7, groundOffset, height, hipsHeight,
+    missing, calibrated: true
+  };
+}
+
+const glbTmpQ = new THREE.Quaternion(), glbTmpParentQ = new THREE.Quaternion();
+const glbQFromJSON = j => new THREE.Quaternion(j.x, j.y, j.z, j.w);
+
+function glbSlerpRate(dt, halfLifeMs) { return 1 - Math.pow(0.5, (dt * 1000) / halfLifeMs); }
+
+const glbMemo = new Map();
+function glbMem(character) {
+  let m = glbMemo.get(character.id);
+  if (!m) { m = { root: new THREE.Vector3(), q: {} }; glbMemo.set(character.id, m); }
+  return m;
+}
+function resetGLBRetarget(character) { glbMemo.delete(character.id); }
+
+/** Set one bone's LOCAL rotation so that, combined with its ACTUAL current
+ *  parent world orientation, the bone ends up at `desiredWorld` — then
+ *  refreshes this bone's subtree so the next bone down the chain reads a
+ *  correct, up-to-date parent orientation. This is the one operation the
+ *  whole retargeter is built from. */
+function applyGLBBoneWorld(bone, desiredWorld, m, key, rate) {
+  if (bone.parent) bone.parent.getWorldQuaternion(glbTmpParentQ); else glbTmpParentQ.identity();
+  const localTarget = glbTmpParentQ.clone().invert().multiply(desiredWorld);
+  const prev = m.q[key] || (m.q[key] = localTarget.clone());
+  prev.slerp(localTarget, rate);
+  bone.quaternion.copy(prev);
+  bone.updateMatrixWorld(true);
+}
+
+/**
+ * Apply one MotionFrame to a calibrated GLB character. Mirrors retarget.js's
+ * applyMotionFrame in spirit and call signature, but every rotation is
+ * computed relative to THIS character's own measured rest pose instead of
+ * assuming identity-rest procedural bones.
+ */
+function applyMotionFrameGLB(character, frame, dt, opts = {}) {
+  const cal = character.glb;
+  if (!cal || !cal.calibrated) return;
+  const bones = cal.bones;
+  const m = glbMem(character);
+  const rate = glbSlerpRate(dt, 90);
+  const conf = opts.confidence ?? 1;
+
+  // Root: translation only, scaled to THIS character's own measured height
+  // instead of the procedural rig's fixed head-unit constant. Yaw is applied
+  // to the Hips bone itself below (via the canonical chain), not the group —
+  // rotating both would double-count the turn.
+  if (frame) {
+    const h = cal.height;
+    const target = new THREE.Vector3(
+      frame.body.root.x * h * 0.55,
+      -cal.groundOffset + frame.body.root.y * h * 0.4,
+      frame.body.root.z * h * 0.55
+    );
+    m.root.lerp(target, rate);
+  } else {
+    m.root.lerp(new THREE.Vector3(0, -cal.groundOffset, 0), rate * 0.3);
+  }
+  character.root.position.copy(m.root);
+
+  // Reconstruct the canonical (T-pose-relative) WORLD orientation per role by
+  // re-chaining MotionFrame's per-role local deltas through the same generic
+  // hierarchy motionSolver used — this recovers exactly what motionSolver
+  // computed internally, without motionSolver needing to know GLBs exist.
+  const canon = {};
+  if (frame) {
+    canon.Hips = glbQFromJSON(frame.body.bones.Hips);
+    for (const role of BODY_CHAIN) {
+      if (role === 'Hips') continue;
+      const parent = BONE_PARENT[role];
+      const j = frame.body.bones[role];
+      if (!j || !canon[parent]) continue;
+      canon[role] = canon[parent].clone().multiply(glbQFromJSON(j));
+    }
+  }
+
+  for (const role of BODY_CHAIN) {
+    const bone = bones[role]; if (!bone) continue;
+    const restQ = cal.restWorldQuat[role]; if (!restQ) continue;
+    const desired = (frame && canon[role]) ? canon[role].clone().multiply(restQ) : restQ.clone();
+    applyGLBBoneWorld(bone, desired, m, role, rate * conf);
+  }
+
+  if (opts.trackHands) applyGLBHands(cal, frame, m, rate);
+  if (opts.trackFace) applyGLBFace(character, cal, frame && frame.face, m, rate);
+  else applyGLBFace(character, cal, null, m, rate * 0.3);
+}
+
+function applyGLBHands(cal, frame, m, rate) {
+  const bones = cal.bones;
+  for (const [side, hand] of [['Left', frame && frame.leftHand], ['Right', frame && frame.rightHand]]) {
+    const sign = side === 'Left' ? 1 : -1;
+    for (const f of GLB_FINGERS) {
+      const role = `${side}${f}`, bone = bones[role]; if (!bone) continue;
+      const restQ = cal.restWorldQuat[role]; if (!restQ) continue;
+      const curl = hand ? (hand.fingers[f] ?? 0) : 0;
+      const canonF = glbTmpQ.clone().setFromAxisAngle(GLB_CURL_AXIS, sign * curl * GLB_CURL_MAX);
+      applyGLBBoneWorld(bone, canonF.multiply(restQ), m, role, rate);
+    }
+  }
+}
+
+const GLB_MORPH_MAP = { jawOpen: 'jawOpen', smile: ['mouthSmileLeft', 'mouthSmileRight'], blinkL: 'eyeBlinkLeft', blinkR: 'eyeBlinkRight', browUp: 'browInnerUp' };
+function setGlbMorph(mesh, name, value) {
+  if (!name) return;
+  const idx = mesh.morphTargetDictionary[name];
+  if (idx === undefined || !mesh.morphTargetInfluences) return;
+  mesh.morphTargetInfluences[idx] = value;
+}
+
+function applyGLBFace(character, cal, face, m, rate) {
+  const bones = cal.bones;
+  const f = face || { jawOpen: 0, smile: .35, blinkL: 0, blinkR: 0, browUp: 0, browDown: 0, yaw: 0, pitch: 0, roll: 0 };
+
+  if (bones.Head && cal.restWorldQuat.Head) {
+    const canonHead = glbTmpQ.clone().setFromEuler(new THREE.Euler(f.pitch, f.yaw, f.roll, 'YXZ'));
+    applyGLBBoneWorld(bones.Head, canonHead.multiply(cal.restWorldQuat.Head), m, 'Head', rate);
+  }
+
+  let usedMorphs = false;
+  character.root.traverse(o => {
+    if (!o.isMesh || !o.morphTargetDictionary) return;
+    usedMorphs = true;
+    setGlbMorph(o, GLB_MORPH_MAP.jawOpen, f.jawOpen);
+    setGlbMorph(o, GLB_MORPH_MAP.blinkL, f.blinkL);
+    setGlbMorph(o, GLB_MORPH_MAP.blinkR, f.blinkR);
+    setGlbMorph(o, GLB_MORPH_MAP.browUp, f.browUp);
+    for (const n of GLB_MORPH_MAP.smile) setGlbMorph(o, n, f.smile * .8);
+  });
+  if (!usedMorphs && bones.Jaw && cal.restWorldQuat.Jaw) {
+    const canonJaw = glbTmpQ.clone().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -f.jawOpen * .45);
+    applyGLBBoneWorld(bones.Jaw, canonJaw.multiply(cal.restWorldQuat.Jaw), m, 'Jaw', rate);
+  }
+}
+
+/** Skeleton-mode debug draw (spec #24): projects a few key mapped bones into
+ *  screen space and labels them, on the same 2D overlay canvas main.js
+ *  already uses for the MediaPipe debug skeleton. */
+const DEBUG_ROLES = ['Hips', 'LeftLowerLeg', 'RightLowerLeg', 'LeftFoot', 'RightFoot', 'Head'];
+function drawGLBDebug(character, camera, ctx, w, h, dpr) {
+  const cal = character.glb; if (!cal) return;
+  ctx.save();
+  ctx.font = `${Math.round(11 * dpr)}px sans-serif`;
+  ctx.lineWidth = 3 * dpr;
+  const wp = new THREE.Vector3();
+  for (const role of DEBUG_ROLES) {
+    const bone = cal.bones[role]; if (!bone) continue;
+    bone.getWorldPosition(wp);
+    const ndc = wp.clone().project(camera);
+    if (ndc.z > 1 || ndc.z < -1) continue;
+    const x = (ndc.x * .5 + .5) * w, y = (1 - (ndc.y * .5 + .5)) * h;
+    ctx.beginPath(); ctx.arc(x, y, 4 * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd23f'; ctx.fill();
+    ctx.strokeStyle = '#1a1330'; ctx.strokeText(role, x + 7 * dpr, y - 6 * dpr);
+    ctx.fillStyle = '#f4f0ff'; ctx.fillText(role, x + 7 * dpr, y - 6 * dpr);
+  }
+  ctx.restore();
+}
+
 // ===== characters.js =====
 // characters.js
 // The character manager. A "character" is always the same shape regardless of
@@ -388,6 +670,10 @@ function buildProceduralCharacter(palette, headH = 0.34) {
 //   { id, name, root (THREE.Group), bones (name -> THREE.Object3D), parts, headH }
 // The motion solver / retargeter only ever talks to `bones`, so swapping the
 // character never requires touching tracking or retargeting code.
+//
+// GLB characters additionally carry `character.glb`, the calibration record
+// from glbRetarget.js's calibrateGLBCharacter() — that record (not headH) is
+// what the GLB-specific retargeter (glbRetarget.js) actually drives from.
 
 const PALETTES = {
   human: { name: 'Pip', skin: '#ffc98f', shirt: '#ff5d8f', sleeve: '#ff5d8f', pants: '#3a6bff', pants2: '#3a6bff', shoe: '#fff3d6', hair: '#5a3524', accent: '#ffd23f', earType: 'ear', emblem: true },
@@ -417,26 +703,45 @@ const ALIASES = {
   Hips: ['hips', 'pelvis', 'root'],
   Spine: ['spine', 'spine1', 'spine01'],
   Chest: ['spine2', 'chest', 'upperchest', 'spine02'],
-  Neck: ['neck'],
+  Neck: ['neck', 'neck1'],
   Head: ['head'],
-  LeftShoulder: ['leftshoulder', 'lclavicle', 'shoulder_l'],
-  LeftUpperArm: ['leftarm', 'leftupperarm', 'upperarm_l'],
-  LeftLowerArm: ['leftforearm', 'leftlowerarm', 'lowerarm_l'],
-  LeftHand: ['lefthand', 'hand_l'],
-  RightShoulder: ['rightshoulder', 'rclavicle', 'shoulder_r'],
-  RightUpperArm: ['rightarm', 'rightupperarm', 'upperarm_r'],
-  RightLowerArm: ['rightforearm', 'rightlowerarm', 'lowerarm_r'],
-  RightHand: ['righthand', 'hand_r'],
-  LeftUpperLeg: ['leftupleg', 'leftupperleg', 'upperleg_l'],
-  LeftLowerLeg: ['leftleg', 'leftlowerleg', 'lowerleg_l'],
-  LeftFoot: ['leftfoot', 'foot_l'],
-  LeftToes: ['lefttoebase', 'lefttoes', 'toes_l'],
-  RightUpperLeg: ['rightupleg', 'rightupperleg', 'upperleg_r'],
-  RightLowerLeg: ['rightleg', 'rightlowerleg', 'lowerleg_r'],
-  RightFoot: ['rightfoot', 'foot_r'],
-  RightToes: ['righttoebase', 'righttoes', 'toes_r']
+  LeftShoulder: ['leftshoulder', 'lclavicle', 'shoulderl'],
+  LeftUpperArm: ['leftarm', 'leftupperarm', 'upperarml'],
+  LeftLowerArm: ['leftforearm', 'leftlowerarm', 'lowerarml'],
+  LeftHand: ['lefthand', 'handl'],
+  RightShoulder: ['rightshoulder', 'rclavicle', 'shoulderr'],
+  RightUpperArm: ['rightarm', 'rightupperarm', 'upperarmr'],
+  RightLowerArm: ['rightforearm', 'rightlowerarm', 'lowerarmr'],
+  RightHand: ['righthand', 'handr'],
+  LeftUpperLeg: ['leftupleg', 'leftupperleg', 'upperlegl'],
+  LeftLowerLeg: ['leftleg', 'leftlowerleg', 'lowerlegl'],
+  LeftFoot: ['leftfoot', 'footl'],
+  LeftToes: ['lefttoebase', 'lefttoe', 'lefttoes', 'toesl'],
+  RightUpperLeg: ['rightupleg', 'rightupperleg', 'upperlegr'],
+  RightLowerLeg: ['rightleg', 'rightlowerleg', 'lowerlegr'],
+  RightFoot: ['rightfoot', 'footr'],
+  RightToes: ['righttoebase', 'righttoe', 'righttoes', 'toesr'],
+  // Mixamo names each finger's first joint e.g. "LeftHandThumb1" — Mimic only
+  // drives one bone per finger (curl amount), so the first joint is the target.
+  LeftThumb: ['lefthandthumb1', 'leftthumb1', 'leftthumb'],
+  LeftIndex: ['lefthandindex1', 'leftindex1', 'leftindex'],
+  LeftMiddle: ['lefthandmiddle1', 'leftmiddle1', 'leftmiddle'],
+  LeftRing: ['lefthandring1', 'leftring1', 'leftring'],
+  LeftPinky: ['lefthandpinky1', 'lefthandlittle1', 'leftpinky1', 'leftpinky', 'leftlittle1'],
+  RightThumb: ['righthandthumb1', 'rightthumb1', 'rightthumb'],
+  RightIndex: ['righthandindex1', 'rightindex1', 'rightindex'],
+  RightMiddle: ['righthandmiddle1', 'rightmiddle1', 'rightmiddle'],
+  RightRing: ['righthandring1', 'rightring1', 'rightring'],
+  RightPinky: ['righthandpinky1', 'righthandlittle1', 'rightpinky1', 'rightpinky', 'rightlittle1'],
+  Jaw: ['jaw'], LeftEyeLid: ['lefteye', 'lefteyelid'], RightEyeLid: ['righteye', 'righteyelid'],
+  LeftBrow: ['leftbrow', 'leftbrowinner'], RightBrow: ['rightbrow', 'rightbrowinner'], MouthCorner: ['mouth', 'jaw']
 };
-const norm = s => s.toLowerCase().replace(/^mixamorig:?/, '').replace(/[_\s.]/g, '');
+// Normalize away exporter prefixes (mixamorig:, mixamorig_, Armature|, etc.)
+// and any spaces/underscores/hyphens/dots, and lowercase, so
+// "mixamorig:LeftForeArm", "Left_Fore_Arm" and "left-forearm" all match.
+const norm = s => s.toLowerCase()
+  .replace(/^(mixamorig[:_]?|armature[|_]?)/, '')
+  .replace(/[_\s.\-]/g, '');
 
 function autoMapBones(root) {
   const found = {};
@@ -453,9 +758,11 @@ function autoMapBones(root) {
   return found;
 }
 
-/** Load a user's own GLB/GLTF and try to puppet it with the same rig the
- *  built-ins use. Returns null (caller should show an error) if no
- *  recognizable humanoid skeleton is found. */
+/** Load a user's own GLB/GLTF, auto-map its bones onto Mimic's canonical
+ *  roles, and calibrate its rest pose. Returns null (caller shows an error)
+ *  only if too little of a humanoid skeleton was found to puppet at all —
+ *  a partial match (e.g. no fingers, no face bones) still succeeds, per
+ *  "don't fail the whole character over a few missing bones". */
 async function loadGLBCharacter(url, name = 'Custom') {
   const loader = new GLTFLoader();
   const gltf = await loader.loadAsync(url);
@@ -464,10 +771,12 @@ async function loadGLBCharacter(url, name = 'Custom') {
   if (!bones.Hips || !bones.Spine || (!bones.LeftUpperArm && !bones.RightUpperArm)) {
     return null; // not a recognizable humanoid — caller decides how to inform the user
   }
-  const box = new THREE.Box3().setFromObject(scene);
-  const headH = Math.max((box.max.y - box.min.y) / 7.5, 0.05); // ~7.5 heads tall, rough default
   scene.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { id: 'custom:' + name, name, root: scene, bones, parts: {}, headH, kind: 'glb' };
+  // Calibrate BEFORE anything else ever touches these bones — calibration
+  // reads rest-pose world transforms, which are only meaningful pre-posing.
+  const glb = calibrateGLBCharacter(scene, bones);
+  const headH = Math.max(glb.height / 7.5, 0.05); // kept for anything still reading headH as a rough scale hint
+  return { id: 'custom:' + name, name, root: scene, bones, parts: {}, headH, kind: 'glb', glb };
 }
 
 /** Public interface the app builds a character library around. Real characters
@@ -1183,11 +1492,12 @@ solver.mirror = opts.mirror;
 let current = null;
 function selectCharacter(id, { fresh = false } = {}) {
   const ch = library.get(id); if (!ch) return;
-  if (current) { holder.remove(current.root); resetRetarget(current); }
+  if (current) { holder.remove(current.root); resetRetarget(current); resetGLBRetarget(current); }
   current = ch; holder.add(ch.root);
   if (fresh) solver.calibrated = false; // re-baseline standing pose for a very different rig size
   store.set('char', id);
   document.querySelectorAll('.chip[data-id]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.id === id)));
+  updateGLBDebugPanel();
 }
 
 const charsEl = $('#chars');
@@ -1209,6 +1519,18 @@ function applyOpts() {
   renderer.setClearColor(0x1a1330, opts.transparent ? 0 : 1);
   stage.classList.toggle('transparent-bg', opts.transparent);
   solver.mirror = opts.mirror;
+  updateGLBDebugPanel();
+}
+function updateGLBDebugPanel() {
+  const panel = $('#glbDebug');
+  if (!panel) return;
+  const show = opts.skel && current && current.kind === 'glb';
+  panel.hidden = !show;
+  if (!show) return;
+  const cal = current.glb;
+  const mapped = Object.keys(cal.bones).map(role => `${role} \u2192 ${cal.bones[role].name || '(unnamed)'}`);
+  const missing = cal.missing.length ? `Missing: ${cal.missing.join(', ')}` : 'All core bones found.';
+  panel.textContent = `${missing}\nMapped (${mapped.length}): ${mapped.join(' \u00b7 ')}`;
 }
 document.querySelectorAll('.tg').forEach(b => {
   b.setAttribute('aria-pressed', String(opts[b.dataset.k]));
@@ -1247,11 +1569,15 @@ $('#recal').addEventListener('click', () => {
 
 $('#customFile').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
-  say('Loading character…');
+  say('Loading character\u2026');
   try {
     const ch = await library.addFromFile(file);
     if (!ch) { say('That file doesn\u2019t look like a rigged humanoid Mimic can recognize.', true); return; }
-    addChip(ch); selectCharacter(ch.id, { fresh: true }); say('');
+    say('Calibrating character\u2026');
+    addChip(ch); selectCharacter(ch.id, { fresh: true });
+    if (ch.glb && ch.glb.missing.length) {
+      say(`Loaded, but couldn\u2019t find: ${ch.glb.missing.join(', ')}. Those parts will stay still.`);
+    } else say('');
   } catch (err) { console.error(err); say('Couldn\u2019t load that GLB file.', true); }
   e.target.value = '';
 });
@@ -1311,10 +1637,15 @@ function loop(now) {
   const usingPlayback = recorder.playing;
   const activeFrame = usingPlayback ? recorder.frameAt(recorder.playT) : liveFrame;
   const trackingAgeOk = !!liveFrame || usingPlayback;
-  applyMotionFrame(current, activeFrame, dt, { trackHands: opts.hands, trackFace: opts.face, confidence: 1 });
+  const applyOpts2 = { trackHands: opts.hands, trackFace: opts.face, confidence: 1 };
+  if (current.kind === 'glb') applyMotionFrameGLB(current, activeFrame, dt, applyOpts2);
+  else applyMotionFrame(current, activeFrame, dt, applyOpts2);
 
   renderer.render(scene, camera);
-  if (opts.skel) drawSkeleton();
+  if (opts.skel) {
+    drawSkeleton();
+    if (current.kind === 'glb') drawGLBDebug(current, camera, og, overlay.width, overlay.height, renderer.getPixelRatio());
+  }
 
   if (now - fpsT > 700) {
     const fps = Math.round(detCount * 1000 / (now - fpsT)); detCount = 0; fpsT = now;
