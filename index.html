@@ -392,7 +392,11 @@ function buildProceduralCharacter(palette, headH = 0.34) {
 const PALETTES = {
   human: { name: 'Pip', skin: '#ffc98f', shirt: '#ff5d8f', sleeve: '#ff5d8f', pants: '#3a6bff', pants2: '#3a6bff', shoe: '#fff3d6', hair: '#5a3524', accent: '#ffd23f', earType: 'ear', emblem: true },
   robot: { name: 'Bolt', skin: '#c9d3e6', shirt: '#3ee0cf', sleeve: '#3ee0cf', pants: '#6a5cf0', pants2: '#6a5cf0', shoe: '#ffd23f', hair: '#3ee0cf', accent: '#ff5d8f', earType: 'antenna', emblem: true },
-  bunny: { name: 'Bun', skin: '#f6f0ff', shirt: '#ffd23f', sleeve: '#ffd23f', pants: '#7a5cff', pants2: '#7a5cff', shoe: '#ff9ecb', hair: '#ff9ecb', accent: '#ff9ecb', earType: 'long', emblem: true }
+  bunny: { name: 'Bun', skin: '#f6f0ff', shirt: '#ffd23f', sleeve: '#ffd23f', pants: '#7a5cff', pants2: '#7a5cff', shoe: '#ff9ecb', hair: '#ff9ecb', accent: '#ff9ecb', earType: 'long', emblem: true },
+  // Stand-in for the hoodie-and-crown-logo character concept: same primitive
+  // rig as the others, just a different colorway, until a real sculpted/
+  // rigged GLB of that character is imported via "Import GLB".
+  kay: { name: 'Kay', skin: '#c98f5e', shirt: '#1b1b26', sleeve: '#2a5bff', pants: '#14141e', pants2: '#14141e', shoe: '#eef1ff', hair: '#171016', accent: '#2a5bff', earType: 'ear', emblem: true }
 };
 
 function createBuiltins() {
@@ -743,12 +747,18 @@ class MotionSolver {
 
     const P = state.pose, mirror = this.mirror;
     const vis = i => P[i].v;
+    // The character faces you (like two people facing each other), so its own
+    // right arm rests toward screen-left and its own left arm rests toward
+    // screen-right. In mirror mode, YOUR right hand ends up on screen-right
+    // after the flip — so it has to drive the character's LEFT-side bones
+    // (the ones that rest on that side) or it swings almost 180° to get
+    // there, which looks like the arm crossing onto the chest.
     const L = mirror
-      ? { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL }
-      : { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR };
-    const R = mirror
       ? { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR }
       : { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL };
+    const R = mirror
+      ? { sh: PI.shL, el: PI.elL, wr: PI.wrL, hip: PI.hipL, knee: PI.kneeL, ank: PI.ankL, toe: PI.toeL }
+      : { sh: PI.shR, el: PI.elR, wr: PI.wrR, hip: PI.hipR, knee: PI.kneeR, ank: PI.ankR, toe: PI.toeR };
     const v = i => toV3(P[i], mirror);
 
     const shL = v(L.sh), shR = v(R.sh), hipL = v(L.hip), hipR = v(R.hip);
@@ -812,9 +822,9 @@ class MotionSolver {
       time: nowSec, scale,
       body: { root, bones },
       // MediaPipe's hand "Left"/"Right" is anatomical, same convention as the
-      // pose landmarks above — so it needs the same mirror-driven swap as L/R did.
-      leftHand: this._hand(state.hands[mirror ? 'Left' : 'Right'], mirror),
-      rightHand: this._hand(state.hands[mirror ? 'Right' : 'Left'], mirror),
+      // pose landmarks above — same left/right swap for the same reason.
+      leftHand: this._hand(state.hands[mirror ? 'Right' : 'Left'], mirror),
+      rightHand: this._hand(state.hands[mirror ? 'Left' : 'Right'], mirror),
       face: this._face(state.face, nowSec, poseYaw, poseRoll)
     };
     return frame;
@@ -1188,7 +1198,7 @@ function addChip(ch) {
   b.addEventListener('click', () => selectCharacter(ch.id, { fresh: true }));
   charsEl.insertBefore(b, $('#addCustom'));
 }
-function swatch(ch) { return { human: '#ff5d8f', robot: '#3ee0cf', bunny: '#ffd23f' }[ch.id] || '#a99fd0'; }
+function swatch(ch) { return { human: '#ff5d8f', robot: '#3ee0cf', bunny: '#ffd23f', kay: '#2a5bff' }[ch.id] || '#a99fd0'; }
 library.list().forEach(addChip);
 selectCharacter(store.get('char', 'human'));
 
