@@ -91,6 +91,10 @@ details#settings summary::-webkit-details-marker{display:none}
 #glbDebug{font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--mint);
   background:var(--ink-3);border-radius:12px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;
   max-height:120px;overflow-y:auto;margin:0}
+.quality-row{display:flex;gap:6px}
+.quality-btn{flex:1;padding:8px 6px;border-radius:10px;background:var(--ink-2);color:var(--muted);
+  font-size:13px;font-weight:500;border:2px solid transparent;text-align:center}
+.quality-btn[aria-checked="true"]{background:var(--coral);color:var(--ink);border-color:var(--coral)}
 
 @media (min-width:820px){
   #app{flex-direction:row-reverse;padding-top:0}
@@ -173,6 +177,14 @@ details#settings summary::-webkit-details-marker{display:none}
       <div class="setting">Rotate <input id="rot" type="range" min="-180" max="180" value="0"></div>
       <div class="setting">Scale <input id="scale" type="range" min="50" max="160" value="100"></div>
       <div class="setting">Distance <input id="dist" type="range" min="180" max="500" value="310"></div>
+      <div class="setting" style="flex-direction:column;align-items:stretch;gap:6px">
+        <span>Motion Quality</span>
+        <div class="quality-row" role="radiogroup" aria-label="Motion Quality">
+          <button class="quality-btn" type="button" data-quality="responsive" role="radio">Responsive</button>
+          <button class="quality-btn" type="button" data-quality="natural" role="radio">Natural</button>
+          <button class="quality-btn" type="button" data-quality="cinematic" role="radio">Cinematic</button>
+        </div>
+      </div>
       <div class="setting">
         <span>Tracking drifting?</span>
         <button id="recal" class="tg" type="button">Recalibrate</button>
@@ -184,6 +196,81 @@ details#settings summary::-webkit-details-marker{display:none}
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ===== motionConfig.js =====
+// motionConfig.js
+// Single shared source of truth for every tunable in the motion-quality
+// layer, so motionSolver.js (spatial shaping — how far a lean should
+// actually go) and retarget.js/glbRetarget.js (temporal shaping — how
+// quickly a bone eases toward that target) read the same numbers, and the
+// Motion Quality setting in the UI can adjust both at once.
+
+// torsoForward/BackwardLeanGain, torsoSideLeanGain: how much of the user's
+// (already-curve-damped) lean actually reaches the character, 0..1.
+// max*Lean: hard ceiling in radians — biomechanically sensible ranges, not
+// arbitrary large rotations (humans lean back far less than they lean
+// forward while just standing and talking to a camera).
+// torsoDistribution: how a computed lean angle is split across the spine
+// chain; should sum to ~1 (Hips gets the least, Chest the most, Head the
+// least of all so it reads as relatively stable — spec items 4 and 8).
+const motionConfig = {
+  torsoForwardLeanGain: 0.55,
+  torsoBackwardLeanGain: 0.55,
+  torsoSideLeanGain: 0.7,
+  maxForwardLean: 0.62,   // ~35°
+  maxBackwardLean: 0.4,   // ~23° — people lean back less than forward
+  maxSideLean: 0.35,      // ~20°
+  leanCurveExponent: 0.75,
+  leanDeadZoneRad: 0.021, // ~1.2° — tiny noise below this is smoothly suppressed, not snapped to zero
+  torsoDistribution: { Hips: 0.10, Spine: 0.25, Chest: 0.35, Neck: 0.15, Head: 0.15 },
+  quality: 'natural'
+};
+
+// Half-life (ms) for the per-bone slerp smoothing in retarget.js/glbRetarget.js
+// at rest (near-still), and the floor it's allowed to shrink to during fast,
+// intentional movement — this is the "adaptive" half of the smoothing: calm
+// when nothing's happening, responsive the moment something is.
+const QUALITY_PRESETS = {
+  responsive: { stillHalfLifeMs: 55, fastHalfLifeMs: 35, leanGainMul: 1.15, maxLeanMul: 1.1 },
+  natural: { stillHalfLifeMs: 100, fastHalfLifeMs: 45, leanGainMul: 1.0, maxLeanMul: 1.0 },
+  cinematic: { stillHalfLifeMs: 170, fastHalfLifeMs: 70, leanGainMul: 0.9, maxLeanMul: 0.95 }
+};
+
+function setMotionQuality(name) {
+  if (!QUALITY_PRESETS[name]) return;
+  motionConfig.quality = name;
+}
+function currentPreset() { return QUALITY_PRESETS[motionConfig.quality] || QUALITY_PRESETS.natural; }
+
+/** The core response curve from the spec: small lean passes through almost
+ *  untouched, medium lean lands around 50-70%, large lean is progressively
+ *  damped — then hard-capped at maxAngle regardless. `raw` and `maxAngle`
+ *  are both radians. Working in a 0..1 fraction of maxAngle (rather than
+ *  raw radians) is what makes an exponent below 1 behave as damping rather
+ *  than amplification: near t=0 the curve's steepness roughly cancels the
+ *  gain<1 reduction (small lean ends up close to 1:1), while it flattens
+ *  approaching t=1 (diminishing returns as lean grows), on top of the hard
+ *  ceiling for anything beyond that. */
+function dampLean(raw, gain, maxAngle, curveExp = motionConfig.leanCurveExponent) {
+  if (maxAngle <= 0) return 0;
+  const t = Math.min(Math.abs(raw) / maxAngle, 1.6);
+  const damped = Math.pow(t, curveExp) * gain * maxAngle;
+  return Math.sign(raw) * Math.min(damped, maxAngle);
+}
+
+/** Smoothly suppresses tiny noise around zero instead of a hard if-cutoff
+ *  (spec item 11: "smoothly interpolate through the dead zone rather than
+ *  creating visible snapping"). Below the zone: fully suppressed. Above a
+ *  margin past it: passes through unchanged. In between: eased. */
+function deadZone(value, zone = motionConfig.leanDeadZoneRad) {
+  const a = Math.abs(value);
+  if (a <= zone) return 0;
+  const margin = zone * 1.8;
+  if (a >= margin) return value;
+  const t = (a - zone) / (margin - zone);
+  const eased = t * t * (3 - 2 * t); // smoothstep
+  return Math.sign(value) * a * eased;
+}
 
 // ===== skeleton.js =====
 // skeleton.js
@@ -420,9 +507,11 @@ const AIM_CHILD = {
 
 // Topological processing order for the main body chain (parent always
 // appears before its children — required for the world-quaternion chaining
-// below to read a correct, already-updated parent orientation).
+// below to read a correct, already-updated parent orientation). Neck/Head
+// are included so they receive their share of the distributed torso lean;
+// face tracking then composes an additional turn/nod on top of Head only.
 const BODY_CHAIN = [
-  'Hips', 'Spine', 'Chest', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'Hips', 'Spine', 'Chest', 'Neck', 'Head', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
   'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand',
   'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
 ];
@@ -544,7 +633,10 @@ function applyMotionFrameGLB(character, frame, dt, opts = {}) {
   if (!cal || !cal.calibrated) return;
   const bones = cal.bones;
   const m = glbMem(character);
-  const rate = glbSlerpRate(dt, 90);
+  const preset = currentPreset();
+  const speed = frame ? (frame.speed ?? 0) : 0;
+  const halfLife = preset.stillHalfLifeMs + (preset.fastHalfLifeMs - preset.stillHalfLifeMs) * speed;
+  const rate = glbSlerpRate(dt, halfLife);
   const conf = opts.confidence ?? 1;
 
   // Root: translation only, scaled to THIS character's own measured height
@@ -619,8 +711,14 @@ function applyGLBFace(character, cal, face, m, rate) {
   const f = face || { jawOpen: 0, smile: .35, blinkL: 0, blinkR: 0, browUp: 0, browDown: 0, yaw: 0, pitch: 0, roll: 0 };
 
   if (bones.Head && cal.restWorldQuat.Head) {
-    const canonHead = glbTmpQ.clone().setFromEuler(new THREE.Euler(f.pitch, f.yaw, f.roll, 'YXZ'));
-    applyGLBBoneWorld(bones.Head, canonHead.multiply(cal.restWorldQuat.Head), m, 'Head', rate);
+    // Compose on top of Head's current world orientation rather than
+    // rebuild from rest — the main BODY_CHAIN loop above already placed
+    // Head at rest * (its share of the distributed torso lean); face
+    // tracking adds the user's own independent turn/nod on top of that,
+    // via its own smoothing key so it doesn't fight the lean's.
+    const faceDelta = glbTmpQ.clone().setFromEuler(new THREE.Euler(f.pitch, f.yaw, f.roll, 'YXZ'));
+    const currentWorld = bones.Head.getWorldQuaternion(new THREE.Quaternion());
+    applyGLBBoneWorld(bones.Head, faceDelta.multiply(currentWorld), m, 'HeadFace', rate);
   }
 
   let usedMorphs = false;
@@ -929,16 +1027,21 @@ class Tracker {
 // (quaternions as {x,y,z,w}), which is what lets the recorder capture a
 // performance once and replay it later on any character (see recorder.js).
 //
-// Two things make tracking feel steadier, borrowed from how workout-tracking
-// apps keep a skeleton readable during fast reps:
+// Three things make tracking feel steadier and more human:
 //   1. Visibility gating + angular-velocity clamping (DirFilter below) — a
 //      limb's direction only updates from landmarks MediaPipe is actually
 //      confident about, and can't swing further than is physically plausible
 //      in one frame, so a single bad detection can't snap a limb somewhere
 //      impossible.
 //   2. Continuous adaptive calibration — the "neutral standing" reference
-//      keeps drifting slowly toward you instead of being fixed from frame
-//      one, so it keeps up if you step back or the camera moves.
+//      (including the user's own natural forward/backward posture, not just
+//      position) keeps drifting slowly toward you instead of being fixed
+//      from frame one.
+//   3. Torso lean is measured relative to that calibrated neutral, passed
+//      through a nonlinear response curve (small lean ~1:1, large lean
+//      progressively damped, hard-capped at a biomechanical limit), and
+//      distributed across Hips/Spine/Chest/Neck/Head instead of dumped
+//      entirely into one bone — see motionConfig.js for every tunable here.
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -1008,12 +1111,19 @@ function fingerCurls(pts) {
   return out;
 }
 
+const TORSO_CHAIN = ['Hips', 'Spine', 'Chest', 'Neck', 'Head'];
+
 class MotionSolver {
   constructor() {
     this.mirror = true;
     this.calibrated = false;
     this.baseShoulderY = 0; this.baseHipX = 0; this.baseShoulderW = 0.4;
+    // Neutral torso lean — the user's own natural resting posture (very
+    // commonly a slight forward lean toward a phone propped up low), learned
+    // the same adaptive way as position, not assumed to be perfectly upright.
+    this.baseLeanFB = 0; this.baseLeanSide = 0;
     this._lastT = null;
+    this._lastShMid = null;
     this._filters = {}; // joint key -> DirFilter, built lazily
   }
 
@@ -1024,25 +1134,33 @@ class MotionSolver {
    *  user stands in a relaxed neutral pose, the same UX a fitness app uses. */
   recalibrate() { this.calibrated = false; }
 
-  /** Keep the "neutral standing" reference current. On the very first good
-   *  frame it snaps to you; after that it eases toward you slowly (~6s time
-   *  constant) so normal movement never drags it around, but real drift —
-   *  stepping back, the phone getting bumped — is absorbed within a few
-   *  seconds instead of staying wrong for the rest of the session. */
-  calibrate(pose, dt) {
+  /** Keep the "neutral standing" reference current — position, height AND
+   *  the user's own natural forward/backward/side lean. On the very first
+   *  good frame it snaps to you; after that it eases toward you slowly (~6s
+   *  time constant) so normal movement never drags it around, but real
+   *  drift — stepping back, the phone getting bumped, sitting back in a
+   *  chair — is absorbed within a few seconds instead of staying wrong for
+   *  the rest of the session. */
+  calibrate(pose, dt, torsoDir) {
     if (!pose) return;
     const shL = toV3(pose[PI.shL], this.mirror), shR = toV3(pose[PI.shR], this.mirror);
     if (pose[PI.shL].v < VIS_MIN || pose[PI.shR].v < VIS_MIN) return;
     const y = (shL.y + shR.y) / 2;
     const x = (toV3(pose[PI.hipL], this.mirror).x + toV3(pose[PI.hipR], this.mirror).x) / 2;
     const w = Math.max(shL.distanceTo(shR), 0.15);
+    const leanFB = Math.atan2(torsoDir.z, torsoDir.y);
+    const leanSide = Math.atan2(torsoDir.x, torsoDir.y);
     if (!this.calibrated) {
-      this.baseShoulderY = y; this.baseHipX = x; this.baseShoulderW = w; this.calibrated = true;
+      this.baseShoulderY = y; this.baseHipX = x; this.baseShoulderW = w;
+      this.baseLeanFB = leanFB; this.baseLeanSide = leanSide;
+      this.calibrated = true;
     } else {
       const a = clamp((dt ?? 1 / 30) / 6, 0, 0.05);
       this.baseShoulderY += (y - this.baseShoulderY) * a;
       this.baseHipX += (x - this.baseHipX) * a;
       this.baseShoulderW += (w - this.baseShoulderW) * a;
+      this.baseLeanFB += (leanFB - this.baseLeanFB) * a;
+      this.baseLeanSide += (leanSide - this.baseLeanSide) * a;
     }
   }
 
@@ -1052,7 +1170,6 @@ class MotionSolver {
     if (!state.pose) return null;
     const dt = this._lastT === null ? 1 / 30 : clamp(nowSec - this._lastT, 0, 0.25);
     this._lastT = nowSec;
-    this.calibrate(state.pose, dt);
 
     const P = state.pose, mirror = this.mirror;
     const vis = i => P[i].v;
@@ -1076,8 +1193,19 @@ class MotionSolver {
     const shoulderW = Math.max(shL.distanceTo(shR), 0.1);
     const scale = this.baseShoulderW / shoulderW; // rough distance-from-camera compensation
 
-    // ---- root: translate with the user (crouch, lean, step), rotate with torso yaw
     const rootConfident = vis(L.sh) > VIS_MIN && vis(R.sh) > VIS_MIN && vis(L.hip) > VIS_MIN && vis(R.hip) > VIS_MIN;
+    const torsoDir = this._filter('torso').update(rootConfident, shMid.clone().sub(hipMid).normalize(), dt);
+    this.calibrate(state.pose, dt, torsoDir);
+
+    // ---- movement-speed estimate, for adaptive smoothing downstream (calm
+    // when still, responsive the instant something intentional happens)
+    let speedNorm = 0;
+    if (this._lastShMid && dt > 0) {
+      speedNorm = clamp(shMid.distanceTo(this._lastShMid) / dt / 1.5, 0, 1);
+    }
+    this._lastShMid = shMid.clone();
+
+    // ---- root: translate with the user (crouch, lean, step), rotate with torso yaw
     const root = {
       x: clamp((hipMid.x - this.baseHipX) * 0.9, -1.4, 1.4),
       y: clamp((shMid.y - this.baseShoulderY) * 0.9, -0.9, 0.5),
@@ -1085,17 +1213,42 @@ class MotionSolver {
       yaw: rootConfident ? clamp(Math.atan2((mirror ? -1 : 1) * (shR.z - shL.z), shoulderW), -1.1, 1.1) : 0
     };
 
-    // ---- torso direction (hips -> shoulders) drives Spine/Chest together
-    const torsoDir = this._filter('torso').update(rootConfident, shMid.clone().sub(hipMid).normalize(), dt);
-    const worldQ = { Hips: new THREE.Quaternion().setFromAxisAngle(V(0, 1, 0), root.yaw) };
-    const bones = {};
+    // ---- torso lean: measured relative to the CALIBRATED neutral posture
+    // (not assumed-upright), dead-zoned to kill tiny noise, passed through
+    // the nonlinear response curve with separate forward/backward/side
+    // gains and hard limits, then split across the spine chain by weight —
+    // this is the core fix for exaggerated leaning. See motionConfig.js.
+    const preset = currentPreset();
+    const rawFB = rootConfident ? Math.atan2(torsoDir.z, torsoDir.y) - this.baseLeanFB : 0;
+    const rawSide = rootConfident ? Math.atan2(torsoDir.x, torsoDir.y) - this.baseLeanSide : 0;
+    const filtFB = deadZone(rawFB);
+    const filtSide = deadZone(rawSide);
+    const fbGain = (filtFB >= 0 ? motionConfig.torsoForwardLeanGain : motionConfig.torsoBackwardLeanGain) * preset.leanGainMul;
+    const fbMax = (filtFB >= 0 ? motionConfig.maxForwardLean : motionConfig.maxBackwardLean) * preset.maxLeanMul;
+    const sideGain = motionConfig.torsoSideLeanGain * preset.leanGainMul;
+    const sideMax = motionConfig.maxSideLean * preset.maxLeanMul;
+    const appliedFB = dampLean(filtFB, fbGain, fbMax);
+    const appliedSide = dampLean(filtSide, sideGain, sideMax);
+
+    const leanLocalQuat = role => {
+      const w = motionConfig.torsoDistribution[role] ?? 0;
+      return new THREE.Quaternion().setFromEuler(new THREE.Euler(appliedFB * w, 0, -appliedSide * w, 'XYZ'));
+    };
+
+    const worldQ = { Hips: new THREE.Quaternion().setFromAxisAngle(V(0, 1, 0), root.yaw).multiply(leanLocalQuat('Hips')) };
+    const bones = { Hips: qToJSON(worldQ.Hips) };
+    for (let i = 1; i < TORSO_CHAIN.length; i++) {
+      const role = TORSO_CHAIN[i], parent = TORSO_CHAIN[i - 1];
+      const q = leanLocalQuat(role);
+      bones[role] = qToJSON(q);
+      worldQ[role] = worldQ[parent].clone().multiply(q);
+    }
+
     const setBone = (name, parentName, dir) => {
       const q = swing(BONE_REST[name].axis, dir, worldQ[parentName]);
       bones[name] = qToJSON(q);
       worldQ[name] = worldQ[parentName].clone().multiply(q);
     };
-    setBone('Spine', 'Hips', torsoDir);
-    setBone('Chest', 'Spine', torsoDir);
     // shoulders stay at rest (identity) — only upper/lower arm swing, which reads
     // clearly on a stylized puppet without needing clavicle motion
     worldQ.LeftShoulder = worldQ.Chest; worldQ.RightShoulder = worldQ.Chest;
@@ -1120,21 +1273,25 @@ class MotionSolver {
     setBone('RightUpperLeg', 'Hips', dir('ul_R', R.hip, R.knee, vis(R.hip), vis(R.knee)));
     setBone('RightLowerLeg', 'RightUpperLeg', dir('ll_R', R.knee, R.ank, vis(R.knee), vis(R.ank)));
     setBone('RightFoot', 'RightLowerLeg', dir('ft_R', R.ank, R.toe, vis(R.ank), vis(R.toe)));
-    bones.Hips = qToJSON(worldQ.Hips);
 
-    // ---- head: prefer face-derived orientation (below); pose-only fallback
+    // ---- head: prefer face-derived orientation (composed on top of the torso's
+    // own small head-share by the retargeter); pose-only fallback for yaw/roll
     const earL = v(PI.earL), earR = v(PI.earR), nose = v(PI.nose);
     const poseYaw = clamp((nose.x - (earL.x + earR.x) / 2) / Math.max(earL.distanceTo(earR), .05) * .9, -.8, .8);
     const poseRoll = -Math.atan2(earR.y - earL.y, earR.x - earL.x || 1e-4);
 
     const frame = {
-      time: nowSec, scale,
+      time: nowSec, scale, speed: speedNorm,
       body: { root, bones },
       // MediaPipe's hand "Left"/"Right" is anatomical, same convention as the
       // pose landmarks above — same left/right swap for the same reason.
       leftHand: this._hand(state.hands[mirror ? 'Right' : 'Left'], mirror),
       rightHand: this._hand(state.hands[mirror ? 'Left' : 'Right'], mirror),
-      face: this._face(state.face, nowSec, poseYaw, poseRoll)
+      face: this._face(state.face, nowSec, poseYaw, poseRoll),
+      debug: {
+        rawLeanFB: rawFB, filteredLeanFB: filtFB, appliedLeanFB: appliedFB,
+        rawLeanSide: rawSide, filteredLeanSide: filtSide, appliedLeanSide: appliedSide
+      }
     };
     return frame;
   }
@@ -1180,7 +1337,7 @@ class MotionSolver {
 
 const tmpQ = new THREE.Quaternion();
 const BODY_BONES = [
-  'Hips', 'Spine', 'Chest', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'Hips', 'Spine', 'Chest', 'Neck', 'Head', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
   'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand',
   'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
 ];
@@ -1211,7 +1368,13 @@ function applyMotionFrame(character, frame, dt, opts = {}) {
   const bones = character.bones;
   const m = mem(character);
   const conf = opts.confidence ?? 1;
-  const rate = slerpRate(dt, 90);
+  // Adaptive smoothing (spec item 6): calm/heavy smoothing near-still to
+  // absorb jitter, shrinking toward a much shorter half-life during fast,
+  // intentional movement so it never feels laggy. Quality preset scales both ends.
+  const preset = currentPreset();
+  const speed = frame ? (frame.speed ?? 0) : 0;
+  const halfLife = preset.stillHalfLifeMs + (preset.fastHalfLifeMs - preset.stillHalfLifeMs) * speed;
+  const rate = slerpRate(dt, halfLife);
 
   if (frame) {
     // root: position + yaw, in character-local "world" units scaled by head size
@@ -1268,8 +1431,14 @@ function applyFace(character, face, m, rate) {
   const bones = character.bones;
   if (bones.Head) {
     const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(f.pitch, f.yaw, f.roll, 'YXZ'));
-    const prev = m.q.Head || (m.q.Head = q.clone());
-    prev.slerp(q, rate); bones.Head.quaternion.copy(prev);
+    const prev = m.q.HeadFace || (m.q.HeadFace = q.clone());
+    prev.slerp(q, rate);
+    // Compose on top of Head's current value rather than overwrite it — the
+    // BODY_BONES loop above already set Head to its (smoothed) share of the
+    // distributed torso lean this frame; face tracking adds the user's own
+    // independent head turn/nod on top of that, instead of replacing it.
+    const leanBase = bones.Head.quaternion.clone();
+    bones.Head.quaternion.copy(leanBase.multiply(prev));
   }
   if (bones.Jaw) {
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -f.jawOpen * .45);
@@ -1521,16 +1690,27 @@ function applyOpts() {
   solver.mirror = opts.mirror;
   updateGLBDebugPanel();
 }
-function updateGLBDebugPanel() {
+function updateGLBDebugPanel(frame) {
   const panel = $('#glbDebug');
   if (!panel) return;
-  const show = opts.skel && current && current.kind === 'glb';
+  const show = opts.skel && current;
   panel.hidden = !show;
   if (!show) return;
-  const cal = current.glb;
-  const mapped = Object.keys(cal.bones).map(role => `${role} \u2192 ${cal.bones[role].name || '(unnamed)'}`);
-  const missing = cal.missing.length ? `Missing: ${cal.missing.join(', ')}` : 'All core bones found.';
-  panel.textContent = `${missing}\nMapped (${mapped.length}): ${mapped.join(' \u00b7 ')}`;
+  const lines = [];
+  if (frame && frame.debug) {
+    const deg = r => (r * 180 / Math.PI).toFixed(1) + '\u00b0';
+    const d = frame.debug;
+    lines.push(`Lean fwd/back \u2014 raw: ${deg(d.rawLeanFB)}  filtered: ${deg(d.filteredLeanFB)}  applied: ${deg(d.appliedLeanFB)}`);
+    lines.push(`Lean side \u2014 raw: ${deg(d.rawLeanSide)}  filtered: ${deg(d.filteredLeanSide)}  applied: ${deg(d.appliedLeanSide)}`);
+    lines.push(`Speed: ${(frame.speed ?? 0).toFixed(2)}  Quality: ${motionConfig.quality}`);
+  }
+  if (current.kind === 'glb' && current.glb) {
+    const cal = current.glb;
+    const mapped = Object.keys(cal.bones).map(role => `${role} \u2192 ${cal.bones[role].name || '(unnamed)'}`);
+    lines.push(cal.missing.length ? `Missing: ${cal.missing.join(', ')}` : 'All core bones found.');
+    lines.push(`Mapped (${mapped.length}): ${mapped.join(' \u00b7 ')}`);
+  }
+  panel.textContent = lines.join('\n');
 }
 document.querySelectorAll('.tg').forEach(b => {
   b.setAttribute('aria-pressed', String(opts[b.dataset.k]));
@@ -1560,6 +1740,15 @@ function applySliders() {
   applySliders();
 }));
 applySliders();
+
+const qualityButtons = document.querySelectorAll('.quality-btn');
+function applyQuality(name) {
+  setMotionQuality(name);
+  store.set('quality', name);
+  qualityButtons.forEach(b => b.setAttribute('aria-checked', String(b.dataset.quality === name)));
+}
+qualityButtons.forEach(b => b.addEventListener('click', () => applyQuality(b.dataset.quality)));
+applyQuality(store.get('quality', 'natural'));
 
 $('#recal').addEventListener('click', () => {
   solver.recalibrate();
@@ -1653,6 +1842,7 @@ function loop(now) {
     else if (recorder.recording) setPill(`\u25cf Recording \u00b7 ${recorder.frames.length ? recorder.frames[recorder.frames.length - 1].t.toFixed(1) : '0.0'}s`, 'warn');
     else if (!trackingAgeOk) setPill('Can\u2019t see you \u2014 step back so your shoulders are in view', 'warn');
     else setPill(`Tracking \u00b7 ${fps} fps`, 'live');
+    if (opts.skel) updateGLBDebugPanel(activeFrame);
     refreshTransportUI();
   } else if (usingPlayback) {
     refreshTransportUI();
